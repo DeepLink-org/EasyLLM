@@ -40,50 +40,51 @@ def ceph_save(state_dict, path):
 
 
 def save_hf_checkpoint(runner, save_cfg, global_step, state_dict=None):
-    PREFIX_CHECKPOINT_DIR = "checkpoint"
-    WEIGHTS_NAME = "pytorch_model.bin"
-    checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{global_step}"
-    run_dir = save_cfg.get('save_path', "checkpoints")
+    if get_rank() == 0:
+        PREFIX_CHECKPOINT_DIR = "checkpoint"
+        WEIGHTS_NAME = "pytorch_model.bin"
+        checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{global_step}"
+        run_dir = save_cfg.get('save_path', "checkpoints")
 
-    output_dir = os.path.join(run_dir, checkpoint_folder)
-    os.makedirs(output_dir, exist_ok=True)
-    logger.info(f"Saving model checkpoint to {output_dir}")
-    if "CEPHBUCKET" in os.environ and os.environ.get("CEPHBUCKET") is not None:
-        save_function = ceph_save
-    else:
-        save_function = torch.save
-    if isinstance(runner.model, DDP):
-        runner.model.module.save_pretrained(
-            output_dir, state_dict=state_dict, safe_serialization=False, save_function=save_function
-        )
-    else:
-        runner.model.save_pretrained(
-            output_dir, state_dict=state_dict, safe_serialization=False, save_function=save_function
-        )
-    logger.info("Saving model state dict done.")
+        output_dir = os.path.join(run_dir, checkpoint_folder)
+        os.makedirs(output_dir, exist_ok=True)
+        logger.info(f"Saving model checkpoint to {output_dir}")
+        if "CEPHBUCKET" in os.environ and os.environ.get("CEPHBUCKET") is not None:
+            save_function = ceph_save
+        else:
+            save_function = torch.save
+        if isinstance(runner.model, DDP):
+            runner.model.module.save_pretrained(
+                output_dir, state_dict=state_dict, safe_serialization=False, save_function=save_function
+            )
+        else:
+            runner.model.save_pretrained(
+                output_dir, state_dict=state_dict, safe_serialization=False, save_function=save_function
+            )
+        logger.info("Saving model state dict done.")
 
-    if runner.tokenizer is not None:
-        try:
-            if hasattr(runner.tokenizer, "tokenizer"):
-                runner.tokenizer.tokenizer.save_pretrained(output_dir)
-            else:
-                runner.tokenizer.save_pretrained(output_dir)
-            logger.info("Saving tokenizer done.")
-        except Exception:
-            logger.warning("Failed to saving tokenizer done!!!")
+        if runner.tokenizer is not None:
+            try:
+                if hasattr(runner.tokenizer, "tokenizer"):
+                    runner.tokenizer.tokenizer.save_pretrained(output_dir)
+                else:
+                    runner.tokenizer.save_pretrained(output_dir)
+                logger.info("Saving tokenizer done.")
+            except Exception:
+                logger.warning("Failed to saving tokenizer done!!!")
 
-    if os.environ.get("CEPHBUCKET", None) is not None:
-        all_files = os.listdir(output_dir)
-        for file_path in all_files:
-            if file_path.endswith('.' + WEIGHTS_NAME.split('.')[-1]):
-                continue
-            local_path = os.path.join(output_dir, file_path)
-            if os.path.isdir(local_path):
-                continue
-            ceph_file_path = get_ceph_path(local_path)
-            from petrel_helper import PetrelHelper
-            with open(local_path, 'rb') as f:
-                PetrelHelper.write(f, ceph_file_path)
+        if os.environ.get("CEPHBUCKET", None) is not None:
+            all_files = os.listdir(output_dir)
+            for file_path in all_files:
+                if file_path.endswith('.' + WEIGHTS_NAME.split('.')[-1]):
+                    continue
+                local_path = os.path.join(output_dir, file_path)
+                if os.path.isdir(local_path):
+                    continue
+                ceph_file_path = get_ceph_path(local_path)
+                from petrel_helper import PetrelHelper
+                with open(local_path, 'rb') as f:
+                    PetrelHelper.write(f, ceph_file_path)
 
 
 def save_ds_checkpoints(runner, save_cfg, global_step):
