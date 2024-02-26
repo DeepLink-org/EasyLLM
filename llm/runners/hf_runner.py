@@ -95,6 +95,7 @@ class HFRunner(object):
 
     def build_optimzer(self):
         optimizer_cfg = self.config['trainer']['optimizer']
+        self.model.to(torch.cuda.current_device())
         self.optimizer = build_optimizer(optimizer_cfg, self.model)
 
     def build_lr_scheduler(self):
