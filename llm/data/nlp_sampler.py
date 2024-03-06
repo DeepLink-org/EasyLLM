@@ -1,8 +1,10 @@
 import torch
 from torch.utils.data.sampler import Sampler, BatchSampler
 import math
+import json
 
 from llm.utils.general.registry_factory import BATCH_SAMPLER_REGISTRY, SAMPLER_REGISTRY
+from .data_utils import get_length_grouped_indices
 
 
 @BATCH_SAMPLER_REGISTRY.register('megatron_pretrain')
@@ -228,6 +230,65 @@ class InfiniteBatchSampler(object):
     def set_consumed_samples(self, consumed_samples):
         self.batch_sampler.sampler.set_consumed_samples(consumed_samples)
         self.consumed_samples = consumed_samples
+
+
+@SAMPLER_REGISTRY.register("dist_length_group")
+class LengthGroupedSampler(Sampler):
+    def __init__(self,
+                 dataset,
+                 dataset_size,
+                 data_parallel_rank,
+                 data_parallel_size,
+                 batch_size=1,
+                 seed=0,
+                 drop_last=False,
+                 lengths=None,
+                 model_input_name="input_ids"):
+        self.rank = data_parallel_rank
+        self.num_replicas = data_parallel_size
+
+        self.batch_size = batch_size
+        self.epoch = 0
+        self.drop_last = drop_last
+
+        if isinstance(lengths, str):
+            with open(lengths, "r") as f:
+                lengths = json.load(f)
+
+        if lengths is None:
+            lengths = [len(feature[model_input_name]) for feature in dataset]
+        elif isinstance(lengths, torch.Tensor):
+            lengths = lengths.tolist()
+
+        self.lengths = lengths
+        if self.drop_last and len(self.lengths) % self.num_replicas != 0:
+            self.num_samples = math.ceil((len(self.lengths) - self.num_replicas) / self.num_replicas)
+        else:
+            self.num_samples = math.ceil(len(self.lengths) / self.num_replicas)
+        self.total_size = self.num_samples * self.num_replicas
+        self.seed = seed
+
+    def __iter__(self):
+        g = torch.Generator()
+        g.manual_seed(self.seed + self.epoch)
+        indices = get_length_grouped_indices(self.lengths, self.batch_size, generator=g)
+
+        if not self.drop_last:
+            indices += indices[: (self.total_size - len(indices))]
+        else:
+            indices = indices[: self.total_size]
+        assert len(indices) == self.total_size
+
+        indices = indices[self.rank : self.total_size : self.num_replicas]
+        assert len(indices) == self.num_samples
+
+        return iter(indices)
+
+    def __len__(self):
+        return self.num_samples
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
 
 
 def build_batch_sampler(cfg_batch_sample):

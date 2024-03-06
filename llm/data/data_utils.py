@@ -385,3 +385,21 @@ def _build_data_cache(data_encode,
     print('All Files Done! Total {} items have been processed.'.format(
         total_build_items),
         flush=True)
+
+
+def get_length_grouped_indices(lengths, batch_size, mega_batch_mult=None, generator=None):
+    if mega_batch_mult is None:
+        mega_batch_mult = min(len(lengths) // (batch_size * 4), 50)
+        if mega_batch_mult == 0:
+            mega_batch_mult = 1
+
+    indices = torch.randperm(len(lengths), generator=generator)
+    megabatch_size = mega_batch_mult * batch_size
+    megabatches = [indices[i: i + megabatch_size].tolist() for i in range(0, len(lengths), megabatch_size)]
+    megabatches = [sorted(megabatch, key=lambda i: lengths[i], reverse=True) for megabatch in megabatches]
+
+    megabatch_maximums = [lengths[megabatch[0]] for megabatch in megabatches]
+    max_idx = torch.argmax(torch.tensor(megabatch_maximums)).item()
+    megabatches[0][0], megabatches[max_idx][0] = megabatches[max_idx][0], megabatches[0][0]
+
+    return [i for megabatch in megabatches for i in megabatch]
