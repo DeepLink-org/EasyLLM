@@ -93,6 +93,8 @@ def build_sampler(cfg_sampler, dataset):
     cfg_sampler['kwargs']['dataset_size'] = len(dataset)
     cfg_sampler['kwargs']['data_parallel_rank'] = get_rank()
     cfg_sampler['kwargs']['data_parallel_size'] = get_world_size()
+    if cfg_sampler["type"] == "dist_length_group":
+        cfg_sampler["kwargs"]["dataset"] = dataset
     return SAMPLER_REGISTRY.build(cfg_sampler)
 
 
