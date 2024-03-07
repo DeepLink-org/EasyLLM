@@ -98,6 +98,15 @@ LORA_WEIGHTS_TO_AVERAGE_ENDSWITH = [
     "self_attn.o_proj.lora_B_weight",
 ]
 
+INTERN_ENDSWITH_MAPPING = {
+    "self_attn.o_proj.weight": "attention.wo.weight",
+    "mlp.gate_proj.weight": "feed_forward.w1.weight",
+    "mlp.down_proj.weight": "feed_forward.w2.weight",
+    "mlp.up_proj.weight": "feed_forward.w3.weight",
+    "post_attention_layernorm.weight": "ffn_norm.weight",
+    "input_layernorm.weight": "attention_norm.weight"
+}
+
 
 def get_ceph_path(path):
     ceph_bucket = os.environ.get('CEPHBUCKET')
@@ -181,6 +190,16 @@ def main():
         help="convert lora weight",
     )
     parser.add_argument(
+        "--save_intern",
+        action='store_true',
+        help="save intern",
+    )
+    parser.add_argument(
+        "--no_save_config",
+        action='store_true',
+        help="do not save config",
+    )
+    parser.add_argument(
         "--output_dir",
         help="Location to write HF model and tokenizer",
     )
@@ -253,7 +272,8 @@ def load_save_func(layers_tp,
                    n_heads=48,
                    num_key_value_heads=8,
                    param_counts=[],
-                   index_dict={"weight_map": {}}):
+                   index_dict={"weight_map": {}},
+                   save_intern=False):
     special_layers = [1, n_layer + 4, n_layer + 5]
     layer_id = layers_tp[0]
     tps = layers_tp[1]
@@ -277,14 +297,30 @@ def load_save_func(layers_tp,
             q_proj_val = torch.cat([tp_dt[s][name][:(g_dims * gs)] for s in range(tp_size)], dim=0)
             k_proj_val = torch.cat([tp_dt[s][name][(g_dims * gs):(g_dims * (gs + 1))] for s in range(tp_size)], dim=0)
             v_proj_val = torch.cat([tp_dt[s][name][(g_dims * (gs + 1)):] for s in range(tp_size)], dim=0)
-            state_dict[key.replace("wqkv", "q_proj")] = q_proj_val
-            state_dict[key.replace("wqkv", "k_proj")] = k_proj_val
-            state_dict[key.replace("wqkv", "v_proj")] = v_proj_val
+            if not save_intern:
+                state_dict[key.replace("wqkv", "q_proj")] = q_proj_val
+                state_dict[key.replace("wqkv", "k_proj")] = k_proj_val
+                state_dict[key.replace("wqkv", "v_proj")] = v_proj_val
+            else:
+                hid_size = q_proj_val.shape[-1]
+                head_dim = hid_size // n_heads
+                q_proj_val = q_proj_val.reshape(-1, gs, head_dim, hid_size)
+                k_proj_val = k_proj_val.reshape(-1, 1, head_dim, hid_size)
+                v_proj_val = v_proj_val.reshape(-1, 1, head_dim, hid_size)
+                qkv_val = torch.cat([q_proj_val, k_proj_val, v_proj_val], dim=1)
+                state_dict[key.replace("self_attn.wqkv.weight", "attention.wqkv.weight")] = qkv_val.reshape(-1, hid_size)
             continue
         elif name in WEIGHTS_WITH_ROW_PARALLELISM_CONTAIN:
             val = torch.cat([tp_dt[s][name] for s in range(tp_size)], dim=1)
         else:
             assert False, 'Not recongnized key {}'.format(key)
+        if save_intern:
+            if name in INTERN_ENDSWITH_MAPPING:
+                key = key.replace(name, INTERN_ENDSWITH_MAPPING[name])
+            elif name == "self_attn.rotary_emb.inv_freq":
+                pass
+            else:
+                assert False, f"Invalid key of {name} which do not support convert to intern mode!"
         state_dict[key] = val
     for k, v in state_dict.items():
         index_dict["weight_map"][k] = filename
@@ -445,7 +481,10 @@ def write_model_fast(args):
             name = list(tp_dt[0].keys())[0]
             assert name == 'word_embeddings.weight', 'model.embed_tokens.weight only map with word_embeddings.weight!'
             val = torch.cat([tp_dt[s][name] for s in range(tp_size)], dim=0)
-            state_dict['model.embed_tokens.weight'] = val
+            if not args.save_intern:
+                state_dict['model.embed_tokens.weight'] = val
+            else:
+                state_dict['model.tok_embeddings.weight'] = val
         elif layer_id == special_layers[1]:
             assert len(tp_dt[0]) == 1, 'model.norm.weight dict have multi keys!'
             name = list(tp_dt[0].keys())[0]
@@ -458,7 +497,10 @@ def write_model_fast(args):
             name = list(tp_dt[0].keys())[0]
             assert name == 'word_embeddings.weight', 'lm_head.weight only map with word_embeddings.weight!'
             val = torch.cat([tp_dt[s][name] for s in range(tp_size)], dim=0)
-            state_dict['lm_head.weight'] = val
+            if not args.save_intern:
+                state_dict['lm_head.weight'] = val
+            else:
+                state_dict['output.weight'] = val
             vocab_size = val.shape[0]
 
     file_path = os.path.join(model_path, filename)
@@ -481,7 +523,8 @@ def write_model_fast(args):
                            n_heads=args.n_heads,
                            num_key_value_heads=args.num_key_value_heads,
                            param_counts=param_counts,
-                           index_dict=index_dict)
+                           index_dict=index_dict,
+                           save_intern=args.save_intern)
     worker = int(os.environ.get('LOADWORKER', 8))
     with Pool(worker) as p:
         _ = p.map(partial_func, layers_tps)
@@ -494,31 +537,32 @@ def write_model_fast(args):
         intermediate_size = compute_intermediate_size(args.dim)
     else:
         intermediate_size = args.intermediate_size
-    if args.num_key_value_heads < 0:
-        config = LlamaConfig(
-            vocab_size=vocab_size,
-            hidden_size=args.dim,
-            intermediate_size=intermediate_size,
-            num_attention_heads=args.n_heads,
-            num_hidden_layers=n_layer,
-            rms_norm_eps=args.norm_eps,
-            max_position_embeddings=args.max_position_embeddings,
-            rope_theta=args.rope_theta
-        )
-    else:
-        config = LlamaConfig(
-            vocab_size=vocab_size,
-            hidden_size=args.dim,
-            intermediate_size=intermediate_size,
-            num_attention_heads=args.n_heads,
-            num_key_value_heads=args.num_key_value_heads,
-            num_hidden_layers=n_layer,
-            rms_norm_eps=args.norm_eps,
-            max_position_embeddings=args.max_position_embeddings,
-            rope_theta=args.rope_theta
-        )
+    if not args.no_save_config:
+        if args.num_key_value_heads < 0:
+            config = LlamaConfig(
+                vocab_size=vocab_size,
+                hidden_size=args.dim,
+                intermediate_size=intermediate_size,
+                num_attention_heads=args.n_heads,
+                num_hidden_layers=n_layer,
+                rms_norm_eps=args.norm_eps,
+                max_position_embeddings=args.max_position_embeddings,
+                rope_theta=args.rope_theta
+            )
+        else:
+            config = LlamaConfig(
+                vocab_size=vocab_size,
+                hidden_size=args.dim,
+                intermediate_size=intermediate_size,
+                num_attention_heads=args.n_heads,
+                num_key_value_heads=args.num_key_value_heads,
+                num_hidden_layers=n_layer,
+                rms_norm_eps=args.norm_eps,
+                max_position_embeddings=args.max_position_embeddings,
+                rope_theta=args.rope_theta
+            )
 
-    config.save_pretrained(model_path_dir)
+        config.save_pretrained(model_path_dir)
 
     if os.environ.get('CEPHBUCKET', None):
         local_files = os.listdir(model_path_dir)
