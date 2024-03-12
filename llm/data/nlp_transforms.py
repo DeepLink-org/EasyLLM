@@ -237,7 +237,7 @@ class InternToolParser(object):
             interpreter = meta['input'].get('interpreter', [])
         elif "messages" in meta:
             messages = meta['messages']
-            tools = meta['tools']
+            tools = meta.get('tools', [])
             interpreter = meta.get('interpreter', [])
         else:
             messages = meta
