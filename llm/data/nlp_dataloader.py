@@ -132,6 +132,9 @@ class BatchAlignCollector(BatchCollector):
             self.data_keys = ["input_ids", "labels"]
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
+        if 'cu_seqlens' in instances[0]:
+            self.pretrain = True
+            self.data_keys = ["input_ids", "labels", "cu_seqlens", "position_ids"]
         item = tuple([instance[key] for instance in instances] for key in self.data_keys)  # noqa
         input_ids, labels = item[:2]
         if self.pretrain:
@@ -177,6 +180,7 @@ class BatchAlignCollector(BatchCollector):
             flat_cu_seqlens = []
             for bidx in range(len(cu_seqlens)):
                 ith_cu_seqlen = torch.clamp(cu_seqlens[bidx], max=self.max_seq_length)
+                ith_cu_seqlen[-1] = position_ids[bidx].size(0)
                 if bidx == 0:
                     flat_cu_seqlens.append(ith_cu_seqlen + bidx * self.max_seq_length)
                 else:

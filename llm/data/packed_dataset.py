@@ -26,7 +26,6 @@ class PackedDataset(Dataset):
                  worker=8,
                  cache_dir='./cache',
                  epoch=1,
-                 alignment=1,
                  ignore_idx=-100,
                  offset_label=False):
         self.dataset = build_dataset(dataset, copy.deepcopy(tokenizer))
@@ -41,7 +40,6 @@ class PackedDataset(Dataset):
         self.packed_length = packed_length
         self.lengths = []
         self.worker = worker
-        self.alignment = alignment
         self.pad_token_id = len(self.tokenizer) - 1
         self.ignore_idx = ignore_idx
         self.offset_label = offset_label
@@ -115,15 +113,6 @@ class PackedDataset(Dataset):
         return sample_indices_epoch, len_samples_shuffled_epoch, acm_len_samples_epoch, pack_group_epoch
 
     def __getitem__(self, item: int):
-        """Given the index, it returns a dict as
-        {
-         'tokens': List[int],
-         'cu_seqlens': List[int],
-         'indexes': List[int], # denotes positional vector as 'tokens'
-         'labels': List[int], # corresponds to 'tokens' and shifted yet, -100 means skipping prediction
-        }
-        """
-
         selected_inds = self.pack_group[item]
 
         input_ids = []
@@ -144,8 +133,6 @@ class PackedDataset(Dataset):
         cu_seqlens = torch.clamp(torch.LongTensor(cu_seqlens), max=self.packed_length)
         position_ids = torch.LongTensor(position_ids)[:self.packed_length]
 
-        input_ids, labels, cu_seqlens, position_ids = self._pad_func(input_ids, labels, cu_seqlens, position_ids)
-
         return {"input_ids": input_ids, "labels": labels, "cu_seqlens": cu_seqlens, "position_ids": position_ids}
 
     def __len__(self):
@@ -154,26 +141,3 @@ class PackedDataset(Dataset):
         n_packs = len(self.pack_group)
         return n_packs
 
-    def _pad_with_alignment(self, input, padding_value=0, is_label=False):
-        max_size = len(input)
-        new_size = math.ceil(max_size / float(self.alignment)) * self.alignment
-        pad_input = torch.LongTensor([padding_value] * min(self.packed_length, new_size))
-        o_size = input.size(0) - 1
-        if is_label:
-            if self.offset_label:
-                pad_input[:o_size] = input[1:]
-            else:
-                pad_input[:o_size + 1] = input[:self.packed_length]
-        else:
-            if self.offset_label:
-                pad_input[:o_size] = input[:-1]
-            else:
-                pad_input[:o_size + 1] = input[:self.packed_length]
-        return pad_input
-
-    def _pad_func(self, input_ids, labels, cu_seqlens=None, position_ids=None):
-        input_ids = self._pad_with_alignment(input_ids, padding_value=self.pad_token_id)
-        labels = self._pad_with_alignment(labels, padding_value=self.ignore_idx, is_label=True)
-        position_ids = self._pad_with_alignment(position_ids, padding_value=0)
-        cu_seqlens[-1] = position_ids.size(0)
-        return input_ids, labels, cu_seqlens, position_ids
