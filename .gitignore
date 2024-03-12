@@ -138,4 +138,4 @@ staticfiles
 # tmp files
 *.swp
 
-data/
+# data/
