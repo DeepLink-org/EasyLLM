@@ -140,4 +140,3 @@ class PackedDataset(Dataset):
         # without additional consideration of sos or eos
         n_packs = len(self.pack_group)
         return n_packs
-
