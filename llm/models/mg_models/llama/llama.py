@@ -63,14 +63,6 @@ class LlamaModelPipe(PipelineModule, MegatronModule):
             interval = checkpoint_num_layers
         else:
             interval = 0
-        self.size_map = None
-        self.skip_checkpoint_layer_range = -1
-        if dynamic_checkpoint is not None:
-            if dynamic_checkpoint['enabled']:
-                self.size_map = dynamic_checkpoint['size_map']
-        self.num_layers_per_pp = math.ceil(self.model_kwargs['num_layers'] / dist_env.get_pipeline_model_parallel_world_size())      # noqa
-        self.start_checkpoint_layer_idx = self.num_layers_per_pp * dist_env.get_pipeline_model_parallel_rank()
-        self.skip_checkpoint_layer_range += self.start_checkpoint_layer_idx
 
         topo = PipeModelDataParallelTopology(num_pp=dist_env.get_pipeline_model_parallel_world_size(),
                                              num_mp=dist_env.get_tensor_model_parallel_world_size(),
@@ -94,27 +86,55 @@ class LlamaModelPipe(PipelineModule, MegatronModule):
                          activation_checkpoint_interval=interval,
                          partition_method=partition_method)
 
+        self.size_map = None
+        self.skip_checkpoint_layer_range = -1
+        if dynamic_checkpoint is not None:
+            if dynamic_checkpoint['enabled']:
+                self.size_map = dynamic_checkpoint['size_map']
+        pp_rank = dist_env.get_pipeline_model_parallel_rank()
+        pp_size = dist_env.get_pipeline_model_parallel_world_size()
+        self.checkpoint_list = []
+        self.ckpt_module_set = ['ParallelTransformerLayerPipe',]
+        self.ckpt_module_exclude = ['EmbeddingPipe']
+        for i in range(pp_size):
+            if pp_rank == i:
+                for j in range(self.parts[i], self.parts[i + 1]):
+                    name = str(self._layer_specs[j])
+                    flag = False
+                    for k in self.ckpt_module_set:
+                        if k in name:
+                            flag = True
+                    if flag:
+                        self.checkpoint_list.append(j)
+
     def _is_checkpointable(self, funcs):
-        # This is an unfortunate hack related to torch and deepspeed activation checkpoint implementations.
-        # Some layers like torch.nn.Embedding will not receive grads if checkpointed, which breaks things.
-        # I presume it's related to the discrete inputs that cannot require_grad? Need to revisit.
-        if self.skip_checkpoint_layer_range < self.start_checkpoint_layer_idx:
-            return all('ParallelTransformerLayerPipe' in f.__class__.__name__ for f in funcs)
-        else:
+        for f in funcs:
             flag = True
-            for f in funcs:
-                flag = flag & ('ParallelTransformerLayerPipe' in f.__class__.__name__)
-                if hasattr(f, "layer_number") and (self.skip_checkpoint_layer_range >= self.start_checkpoint_layer_idx):
-                    flag = flag & (f.layer_number < self.skip_checkpoint_layer_range)
-                    # flag = False
-                    # print(f.layer_number, f"checkpoint {flag}")
-            return flag
+            if f.__class__.__name__ in self.ckpt_module_set:
+                if self.size_map is None or self.skip_checkpoint_layer_range < 0:
+                    return flag
+                if hasattr(f, "layer_number"):
+                    layer_number = f.layer_number
+                    if layer_number in self.checkpoint_list:
+                        index = self.checkpoint_list.index(layer_number)
+                        flag &= index < self.skip_checkpoint_layer_range
+                else:
+                    if f.__class__.__name__ in self.ckpt_module_exclude:
+                        flag = False
+            else:
+                flag = False
+        return flag
+
 
     def get_checkpoint_range(self, seq_len):
         size_list = sorted(list(self.size_map.keys()))
         for item in size_list:
             if seq_len <= item:
-                return self.size_map[item]
+                range_size = self.size_map[item]
+                if isinstance(range_size, list):
+                    pp_rank = dist_env.get_pipeline_model_parallel_rank()
+                    range_size = range_size[pp_rank]
+                return range_size
         return -1
 
     def get_seq_len(self, forward_input):
@@ -133,7 +153,7 @@ class LlamaModelPipe(PipelineModule, MegatronModule):
     def forward(self, forward_input):
         seq_len = self.get_seq_len(forward_input)
         if self.size_map is not None:
-            self.skip_checkpoint_layer_range = self.start_checkpoint_layer_idx + self.get_checkpoint_range(seq_len)
+            self.skip_checkpoint_layer_range = self.get_checkpoint_range(seq_len)
         return super().forward(forward_input)
 
     def _set_model_kwargs(self, num_layers, checkpoint_activations):
@@ -168,7 +188,7 @@ class LlamaModelPipe(PipelineModule, MegatronModule):
         specs.append(transpose)
 
         for layer_idx in range(num_layers):
-            self.transformer_layer_params.update({'layer_number': layer_idx})
+            self.transformer_layer_params.update({'layer_number': layer_idx + 3})
             specs.append(LayerSpec(ParallelTransformerLayerPipe, **self.transformer_layer_params))
 
         # Undo data format change
