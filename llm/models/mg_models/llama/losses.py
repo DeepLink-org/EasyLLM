@@ -47,7 +47,11 @@ class CrossEntropy(object):
 
     def __call__(self, output, labels):
         labels, loss_mask = labels[0], labels[1]
-
+        if (labels == -100).all():
+            bs, s = labels.shape
+            ignore_mask = (labels != -100).view(-1)
+            loss = output.view(bs * s, -1)[ignore_mask].sum()
+            return loss
         losses = vocab_parallel_cross_entropy(output.contiguous().float(),
                                               labels, self.cut_size)
         expected_number_of_tokens, loss_mask = self.get_expected_number_of_tokens(labels, loss_mask)
