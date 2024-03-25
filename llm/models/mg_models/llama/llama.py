@@ -1,8 +1,7 @@
-import math
-
 from deepspeed.pipe import PipelineModule, LayerSpec
 from deepspeed.runtime.pipe.topology import PipeModelDataParallelTopology
 from deepspeed.runtime import utils as ds_utils
+import torch.nn as nn
 
 from llm.utils.env import dist_env
 from ..base_modules.modules.meg_module import MegatronModule
