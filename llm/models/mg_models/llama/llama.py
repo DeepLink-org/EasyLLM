@@ -2,6 +2,7 @@ import math
 
 from deepspeed.pipe import PipelineModule, LayerSpec
 from deepspeed.runtime.pipe.topology import PipeModelDataParallelTopology
+from deepspeed.runtime import utils as ds_utils
 
 from llm.utils.env import dist_env
 from ..base_modules.modules.meg_module import MegatronModule
@@ -17,6 +18,7 @@ from .utils import load_lora_ckpt_pretrained, load_ckpt_pretrained, save_lora_ck
 from .utils import set_train_params, set_train_status
 from ..base_modules.utils import check_keys_mapping
 from llm.utils.general.registry_factory import LOSS_REGISTRY
+from llm.utils.general.log_helper import default_logger as logger
 
 
 class LlamaModelPipe(PipelineModule, MegatronModule):
@@ -158,6 +160,61 @@ class LlamaModelPipe(PipelineModule, MegatronModule):
 
     def _set_model_kwargs(self, num_layers, checkpoint_activations):
         self.model_kwargs = {"num_layers": num_layers, "checkpoint_activations": checkpoint_activations}
+
+    def _partition_layers(self, method='uniform'):
+        num_stages = self._topo.get_dim('pipe')
+        stage_id = self._topo.get_coord(self.global_rank).pipe
+
+        if self.global_rank == 0:
+            logger.info(f'Partitioning pipeline stages with method {method}')
+
+        method = method.lower()
+
+        # Each stage gets a simple uniform number of layers.
+        if method == 'uniform':
+            num_layers = len(self._layer_specs)
+            self.parts = ds_utils.partition_uniform(num_items=num_layers, num_parts=num_stages)
+        elif method == 'parameters':
+            param_counts = self._count_layer_params()
+            self.parts = ds_utils.partition_balanced(weights=param_counts, num_parts=num_stages)
+        elif "manual" in method:
+            self.parts = method.split("manual:")[1].split(',')
+            self.parts = [int(item) for item in self.parts]
+        elif method.startswith('type:'):
+            layertype = method.split(':')[1]
+            binary_weights = [0] * len(self._layer_specs)
+            for idx in self._find_layer_type(layertype):
+                binary_weights[idx] = 1
+            self.parts = ds_utils.partition_balanced(weights=binary_weights, num_parts=num_stages)
+        elif method == 'profile':
+            raise NotImplementedError(f'Partitioning method {method} not implemented.')
+        else:
+            raise NotImplementedError(f'Partitioning method {method} not implemented.')
+
+        # Print some information on the partitioning.
+        if self.global_rank == 0:
+            for stage in range(num_stages):
+                start = self.parts[stage]
+                stop = self.parts[stage + 1]
+                print(f'stage={stage} layers={stop - start}')
+                for idx, layer in enumerate(self._layer_specs[start:stop]):
+                    name = str(layer)
+                    if isinstance(layer, LayerSpec):
+                        name = layer.typename.__name__
+                    if isinstance(layer, nn.Module):
+                        name = layer.__class__.__name__
+                    else:
+                        try:
+                            name = layer.__name__
+                        except AttributeError:
+                            pass
+                    print(f'    {idx+start:2d}: {name}')
+            if self.loss_fn:
+                try:
+                    print(f'  loss: {self.loss_fn.__name__}')
+                except AttributeError:
+                    print(f'  loss: {self.loss_fn.__class__.__name__}')
+        self._set_bounds(start=self.parts[stage_id], stop=self.parts[stage_id + 1])
 
     def build_specs(self, num_layers, fp16, bf16, fp32_residual_connection, pretrain_causal_attention):
         specs = []
