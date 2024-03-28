@@ -222,6 +222,10 @@ class BaseRunner(object):
             self.lr_scheduler.consumed_train_tokens = self.consumed_train_tokens
         if hasattr(self.lr_scheduler, 'num_steps'):
             self.lr_scheduler.num_steps = self.consumed_train_samples     # deepspeed based
+        # TODO hardcode fix torch load bugs
+        for k, v in self.optimizer.state_dict()['base_optimizer_state']['state'].items():
+            if 'step' in v:
+                v['step'] = v['step'].to(torch.cuda.current_device())
         torch.distributed.barrier()
 
     def save_checkpoint(self, cur_iter):
