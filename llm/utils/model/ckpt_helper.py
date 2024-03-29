@@ -28,17 +28,16 @@ def get_checkpoint_name(checkpoints_path, iteration, release=False):
                         'model_optim_rng.pt')
 
 
-def load_checkpoint(model, optimizer, num_microbatches_calculator,
-                    cfg_loader, lora_mode=False, cfg_lora=None):
+def load_checkpoint(model, optimizer, cfg_loader, iteration,
+                    lora_mode=False, cfg_lora=None):
     """Load a model checkpoint and return the iteration.
     strict (bool): whether to strictly enforce that the keys in
         :attr:`state_dict` of the checkpoint match the names of
         parameters and buffers in model.
     """
-    iteration = 0
-    consumed_train_samples = 0
-    consumed_train_tokens = 0
-
+    if cfg_loader.get("debug", False):
+        logger.info('[Debug mode] Model will be initialized randomly...')
+        return
     load_mode = cfg_loader.get("load_mode", "deepspeed")
     logger.info('Load Checkpoint in the {} Mode...'.format(load_mode))
     if (load_mode != 'deepspeed'):
@@ -54,7 +53,7 @@ def load_checkpoint(model, optimizer, num_microbatches_calculator,
             # Wait so everyone is done (necessary)
             if torch.distributed.is_initialized():
                 torch.distributed.barrier()
-        return iteration, consumed_train_samples, consumed_train_tokens
+        return
 
     # using the default deepspeed load_checkpoint func
     tag = cfg_loader.get('load_tag', None)
@@ -70,24 +69,7 @@ def load_checkpoint(model, optimizer, num_microbatches_calculator,
     if loaded_dir is None:
         logger.info('WARNING: could not find the metadata file {} '.format(cfg_loader['load_path']))
         logger.info('Fail to load any checkpoints and will start from random')
-        return iteration, consumed_train_samples, consumed_train_tokens
-
-    if cfg_loader.get('load_base_state', False):
-        # Set iteration.
-        try:
-            iteration = state_dict['iteration']
-            if 'tokens' in state_dict:
-                consumed_train_tokens = state_dict['tokens']
-            if 'samples' in state_dict:
-                consumed_train_samples = state_dict['samples']
-                if num_microbatches_calculator is not None:
-                    num_microbatches_calculator.update(consumed_train_samples, True)
-        except KeyError:
-            try:  # Backward compatible with older checkpoints
-                iteration = state_dict['total_iters']
-            except KeyError:
-                logger.info('A metadata file exists but unable to load iteration from checkpoint, exiting')
-                sys.exit()
+        return
 
     # rng states.
     if cfg_loader.get('load_rng_state', False):
@@ -119,6 +101,29 @@ def load_checkpoint(model, optimizer, num_microbatches_calculator,
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
 
+    return
+
+
+def load_base_state(cfg_loader):
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+    load_path = cfg_loader['load_path']
+    tag = cfg_loader.get('load_tag', None)
+    if tag is None:
+        latest_path = os.path.join(load_path, "latest")
+        if os.path.isfile(latest_path):
+            with open(latest_path, "r") as f:
+                tag = f.read().strip()
+
+    assert tag is not None, "Please set the load tag"
+    base_state_dict = torch.load(os.path.join(load_path, tag, "base_state.pt"))
+    iteration = base_state_dict['iteration']
+    consumed_train_samples = base_state_dict['samples']
+    consumed_train_tokens = base_state_dict['tokens']
+
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
     return iteration, consumed_train_samples, consumed_train_tokens
 
 
@@ -189,6 +194,14 @@ def save_checkpoint(iteration, consumed_train_samples, consumed_train_tokens, mo
                 # for low version of deepspeed
                 logger.warning('The version of deepspeed is not support the option of save_base_state, save_zero, and save_optim')      # noqa
                 model.save_checkpoint(checkpoint_name, tag=save_tag, client_state=state_dict)
+
+    if torch.distributed.get_rank() == 0:
+        base_state_dict = {}
+        base_state_dict['iteration'] = iteration
+        base_state_dict['samples'] = consumed_train_samples
+        base_state_dict['tokens'] = consumed_train_tokens
+        tag = "global_step{}".format(iteration)
+        torch.save(base_state_dict, os.path.join(cfg_saver['save_path'], tag, "base_state.pt"))
 
     logger.info('Successfully saved checkpoint at iteration {:7d} to {}'.format(iteration, cfg_saver['save_path']))      # noqa
 

@@ -22,7 +22,7 @@ from llm.utils.general.microbatches import build_num_microbatches_calculator
 from llm.utils.model.optimizer_helper import build_optimizer
 from llm.utils.model.lr_helper import build_learning_rate_scheduler
 from llm.utils.model.initializer import set_defaults_if_not_set_tensor_model_parallel_attributes
-from llm.utils.model.ckpt_helper import load_checkpoint, save_checkpoint
+from llm.utils.model.ckpt_helper import load_checkpoint, save_checkpoint, load_base_state
 from llm.utils.general.utils import get_train_iters
 
 from llm.data import build_tokenizer, build_batch_pipe_fn, build_data_iterator
@@ -52,15 +52,20 @@ class BaseRunner(object):
         self.build_tokenizer()
         self.build_hooks()
         self.build_model()
+        self.build_data_engine()
         self.build_trainer()
         self.deepspeed_init()
         self.load_checkpoint()
-        self.build_data_engine()
 
     def set_param_components(self):
         self.start_iteration = 0
         self.consumed_train_samples = 0
         self.consumed_train_tokens = 0
+        cfg_loader = self.config["loader"]
+        if (not cfg_loader.get("debug", False)) and cfg_loader.get("load_base_state", False):
+            self.start_iteration, self.consumed_train_samples, \
+                self.consumed_train_tokens = load_base_state(cfg_loader)
+
         # set deepspeed configs
         self.deepspeed = self.config['runtime'].get('deepspeed', True)
         assert self.deepspeed is True, 'only support deepspeed mode now!'
@@ -113,6 +118,7 @@ class BaseRunner(object):
     def build_num_microbatches_calculator(self):
         if self.training:
             self.num_microbatches_calculator = build_num_microbatches_calculator(self.config['data']['train']['batch_calculator'])      # noqa
+            self.num_microbatches_calculator.update(self.consumed_train_samples, True)
         else:
             self.num_microbatches_calculator = None
 
@@ -184,7 +190,14 @@ class BaseRunner(object):
             cfg_lr_scheduler['kwargs']['max_lr'] = cfg_optim['kwargs']['lr']        # noqa
             if cfg_lr_scheduler['type'] == 'iter_base_annealing':
                 cfg_lr_scheduler['kwargs']['global_batch_size'] = self.num_microbatches_calculator.global_batch_size
+                train_iters = cfg_lr_scheduler['kwargs'].get('train_iters', None)
+                if train_iters is None:
+                    cfg_lr_scheduler['kwargs']['train_iters'] = self.total_train_iters
             lr_scheduler = build_learning_rate_scheduler(cfg_lr_scheduler, optimizer)
+            if hasattr(lr_scheduler, 'consumed_train_tokens'):
+                lr_scheduler.consumed_train_tokens = self.consumed_train_tokens
+            if hasattr(lr_scheduler, 'num_steps'):
+                lr_scheduler.num_steps = self.consumed_train_samples     # deepspeed based
         else:
             optimizer = None
             lr_scheduler = None
@@ -215,13 +228,9 @@ class BaseRunner(object):
     def load_checkpoint(self):
         # args = self.args
         torch.distributed.barrier()
-        self.start_iteration, self.consumed_train_samples, \
-            self.consumed_train_tokens = load_checkpoint(self.model, self.optimizer, self.num_microbatches_calculator,
-                                                         self.config['loader'], self.lora_mode, self.cfg_lora)     # noqa
-        if hasattr(self.lr_scheduler, 'consumed_train_tokens'):
-            self.lr_scheduler.consumed_train_tokens = self.consumed_train_tokens
-        if hasattr(self.lr_scheduler, 'num_steps'):
-            self.lr_scheduler.num_steps = self.consumed_train_samples     # deepspeed based
+        load_checkpoint(self.model, self.optimizer, self.config['loader'],
+                        self.start_iteration, self.lora_mode, self.cfg_lora)     # noqa
+
         # TODO hardcode fix torch load bugs
         for k, v in self.optimizer.state_dict()['base_optimizer_state']['state'].items():
             if 'step' in v:

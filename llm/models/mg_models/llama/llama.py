@@ -95,7 +95,7 @@ class LlamaModelPipe(PipelineModule, MegatronModule):
         pp_rank = dist_env.get_pipeline_model_parallel_rank()
         pp_size = dist_env.get_pipeline_model_parallel_world_size()
         self.checkpoint_list = []
-        self.ckpt_module_set = ['ParallelTransformerLayerPipe',]
+        self.ckpt_module_set = ['ParallelTransformerLayerPipe',] # noqa
         self.ckpt_module_exclude = ['EmbeddingPipe']
         for i in range(pp_size):
             if pp_rank == i:
@@ -125,7 +125,6 @@ class LlamaModelPipe(PipelineModule, MegatronModule):
             else:
                 flag = False
         return flag
-
 
     def get_checkpoint_range(self, seq_len):
         size_list = sorted(list(self.size_map.keys()))
