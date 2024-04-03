@@ -209,6 +209,7 @@ class InternToolParser(object):
                  use_interpreter=True,
                  ensure_ascii=False,
                  tool_mode='merge'):
+        # system prompt won't be deleted,
         self.tokenizer = tokenizer
         self.ignore_index = ignore_index
         self.keep_all_keys = keep_all_keys
@@ -248,7 +249,6 @@ class InternToolParser(object):
 
         tokens.extend([self.tokenizer.bos_token_id])
         labels.extend([self.ignore_index])
-
         conversation_messages = messages
         if self.use_system:
             if messages[0]['role'] == 'system' and messages[0]['content'] != '':
@@ -261,7 +261,8 @@ class InternToolParser(object):
                 conversation_messages = messages[1:]
 
         if self.use_interpreter and (len(interpreter) > 0):
-            assert (len(interpreter) == 1) and (interpreter[0]["name"] == "python_interpreter"), "Only support python interpreter now!"     # noqa
+            assert (len(interpreter) == 1) and (
+                        interpreter[0]["name"] == "python_interpreter"), "Only support python interpreter now!"  # noqa
             interpreter_str = f"{self.conversation_start}system name={self.interpreter_prompt}\n{interpreter[0]['description']}\n{self.conversation_end}\n"
             tokenized_interpreter = self.tokenizer(interpreter_str, return_attention_mask=False, add_special_tokens=False)['input_ids']
             tokens.extend(tokenized_interpreter)
@@ -269,6 +270,7 @@ class InternToolParser(object):
         if len(tools) > 0:
             plugin_tools = []
             for tool in tools:
+                # use_interpreter=True and tool['function']['name']="python_interpreter" skip
                 if not (self.use_interpreter and (tool['function']['name'] == "python_interpreter")):
                     plugin_tools.append(copy.deepcopy(tool['function']))
             if len(plugin_tools) > 0:
@@ -285,6 +287,9 @@ class InternToolParser(object):
                 tokens.extend(tokenized_plugin_tools)
                 labels.extend([self.ignore_index] * len(tokenized_plugin_tools))
 
+        essential_prompt_len = len(tokens)
+        last_dialog_index = len(tokens)
+        dialog_len_list = []
         for item in conversation_messages:
             # assert item['role'] != 'system', "only allow system at the start of conversation"
             if self.use_knowledge:
@@ -296,16 +301,19 @@ class InternToolParser(object):
                                                 add_special_tokens=False)['input_ids']
                 tokens.extend(tokenized_user)
                 labels.extend([self.ignore_index] * len(tokenized_user))
+
             if item['role'] == 'assistant':
                 assis_start = f"{self.conversation_start}assistant\n"
                 tokens_assistant_start = self.tokenizer(assis_start, return_attention_mask=False,
                                                         add_special_tokens=False)['input_ids']
                 tokens.extend(tokens_assistant_start)
                 labels.extend([self.ignore_index] * len(tokens_assistant_start))
-
                 assis_info = ""
                 if item['content']:
-                    assis_info = item['content']
+                    if isinstance(item['content'], dict):
+                        assis_info = json.dumps(item['content'], ensure_ascii=False)
+                    else:
+                        assis_info = item['content']
 
                 if 'tool_calls' in item and len(item['tool_calls']) > 0:
                     assis_info += self.action_start
@@ -315,7 +323,6 @@ class InternToolParser(object):
                         else:
                             assis_info += f"{self.plugin_prompt}\n{json.dumps(tool_call['function'], ensure_ascii=self.ensure_ascii)}\n"
                     assis_info += self.action_end
-
                 if not self.inference_mode:
                     assis_info += f"{self.conversation_end}\n"
                 tokenized_assistant = self.tokenizer(assis_info, return_attention_mask=False,
@@ -331,9 +338,13 @@ class InternToolParser(object):
                 tokenized_response = self.tokenizer(response_info, return_attention_mask=False, add_special_tokens=False)['input_ids']
                 tokens.extend(tokenized_response)
                 labels.extend([self.ignore_index] * len(tokenized_response))
+
+            if item["role"] == "assistant" and ("tool_calls" not in item):
+                dialog_len_list.append(len(tokens) - last_dialog_index)
+                last_dialog_index = len(tokens)
+
         if self.inference_mode:
-            infer_tokens_assistant_prompt = self.tokenizer(f"{self.conversation_start}assistant\n", return_attention_mask=False,
-                                                           add_special_tokens=False)['input_ids']
+            infer_tokens_assistant_prompt = self.tokenizer(f"{self.conversation_start}assistant\n", return_attention_mask=False, add_special_tokens=False)['input_ids'] # noqa
             tokens.extend(infer_tokens_assistant_prompt)
             labels.extend([self.ignore_index] * len(infer_tokens_assistant_prompt))
             return tokens, []
@@ -343,11 +354,22 @@ class InternToolParser(object):
             if self.drop_meta and len(tokens) > self.max_seq_length:
                 return None
             # drop question to avoid no loss
-            tokens = tokens[-self.max_seq_length:]
-            labels = labels[-self.max_seq_length:]
-            input_ids = torch.LongTensor(tokens)
-            labels = torch.LongTensor(labels)
-            results = {'input_ids': input_ids, 'labels': labels}
+            seq_length = 0
+            for dialog_len in dialog_len_list[::-1]:
+                if (seq_length + dialog_len + essential_prompt_len) >= self.max_seq_length:
+                    break
+                seq_length += dialog_len
+
+            if seq_length == 0:
+                tokens = tokens[:essential_prompt_len]
+                labels = tokens[:essential_prompt_len]
+                return None
+            else:
+                tokens = tokens[:essential_prompt_len] + tokens[-seq_length:]
+                labels = labels[:essential_prompt_len] + labels[-seq_length:]
+        input_ids = torch.LongTensor(tokens)
+        labels = torch.LongTensor(labels)
+        results = {'input_ids': input_ids, 'labels': labels}
         return results
 
 
