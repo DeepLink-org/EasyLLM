@@ -200,8 +200,15 @@ def save_checkpoint(iteration, consumed_train_samples, consumed_train_tokens, mo
         base_state_dict['iteration'] = iteration
         base_state_dict['samples'] = consumed_train_samples
         base_state_dict['tokens'] = consumed_train_tokens
-        tag = "global_step{}".format(iteration)
-        torch.save(base_state_dict, os.path.join(cfg_saver['save_path'], tag, "base_state.pt"))
+
+        save_tag = cfg_saver.get('save_tag', None)
+        if save_tag:
+            save_path = os.path.join(cfg_saver['save_path'], save_tag)
+        else:
+            tag = "global_step{}".format(iteration)
+            save_path = os.path.join(cfg_saver['save_path'], tag)
+        torch.save(base_state_dict, os.path.join(save_path, "base_state.pt"))
+        logger.info('Successfully saved base_state at iteration {:7d} to {}'.format(iteration, cfg_saver['save_path']))      # noqa
 
     logger.info('Successfully saved checkpoint at iteration {:7d} to {}'.format(iteration, cfg_saver['save_path']))      # noqa
 
