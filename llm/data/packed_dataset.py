@@ -1,11 +1,9 @@
 from torch.utils.data import Dataset
-import itertools as it
-import operator
 import copy
 import os
-import math
 import numpy as np
 import torch
+import json
 from llm.utils.general.registry_factory import DATASET_REGISTRY
 from multiprocessing.pool import ThreadPool as Pool
 from llm.data.nlp_dataset import build_dataset
@@ -25,12 +23,12 @@ class PackedDataset(Dataset):
                  packed_length=4096,
                  worker=8,
                  cache_dir='./cache',
-                 epoch=1,
                  ignore_idx=-100,
-                 offset_label=False):
+                 packed_length_thresh=4050,
+                 iter_time=1,
+                 display_bin_size=128):
         self.dataset = build_dataset(dataset, copy.deepcopy(tokenizer))
         self.dataset_cfg = dataset
-        self.epoch = epoch
         self.tokenizer = tokenizer
         self.cache_dir = cache_dir
         if length_path is None:
@@ -42,14 +40,87 @@ class PackedDataset(Dataset):
         self.worker = worker
         self.pad_token_id = len(self.tokenizer) - 1
         self.ignore_idx = ignore_idx
-        self.offset_label = offset_label
         os.makedirs(cache_dir, exist_ok=True)
         logger.info("Begin preprocess dataset")
         self.preprocess()
         logger.info("Preprocess dataset successed")
         self.seed = DEFAULT_SEED
-        self.sample_indices, self.len_samples_shuffled, self.acm_len_samples, self.pack_group = self.accu_sample_len(seed=self.seed) # noqa
+        self.pack_group = self.process_random_groups(self.tokens_lengths, packed_length, packed_length_thresh, iter_time) # noqa
         self.num_tokens = sum(self.lengths)
+        self.display_groups_info(display_bin_size)
+
+    def display_groups_info(self, display_bin_size):
+        info = {}
+        info['length_info'] = {}
+        ave_length = 0
+        min_length = 100000000
+        max_length = 0
+        for g in self.pack_group:
+            llm_num = self.get_token_sum(g)
+            llm_num_bin = (llm_num // display_bin_size) * display_bin_size
+            if llm_num_bin not in info['length_info']:
+                info['length_info'][llm_num_bin] = 0
+            info['length_info'][llm_num_bin] += 1
+            min_length = min(llm_num, min_length)
+            max_length = max(max_length, llm_num)
+            ave_length += llm_num
+        info['min_length'] = min_length
+        info['max_length'] = max_length
+        info['ave_length'] = ave_length / (len(self.pack_group))
+        info['group_num'] = len(self.pack_group)
+        print(json.dumps(info, indent=4, sort_keys=True))
+
+    def random_group(self, token_lengths, seed=None, llm_packed_length=4096):
+        rng = np.random.RandomState(seed)
+        index = list(range(len(token_lengths)))
+        rng.shuffle(index)
+
+        pack_group = []
+        llm_token_length_sum = 0
+        each_group = []
+        for idx, sample_id in enumerate(index):
+            llm_sample_length = token_lengths[sample_id][1]
+            if llm_sample_length > llm_packed_length:
+                continue
+            llm_token_length_sum += llm_sample_length
+            if llm_token_length_sum > llm_packed_length:
+                pack_group.append(each_group)
+                llm_token_length_sum = llm_sample_length
+                each_group = [token_lengths[sample_id]]
+            else:
+                each_group.append(token_lengths[sample_id])
+            if idx == len(token_lengths) - 1:
+                if len(each_group) > 0:
+                    pack_group.append(each_group)
+        return pack_group
+
+    def get_token_sum(self, g):
+        sum = 0
+        for i in g:
+            sum += i[1]
+        return sum
+
+    def process_random_groups(self, token_lengths, llm_max, llm_thresh=4050, iter_time=10):
+        groups = self.random_group(token_lengths, self.seed, llm_max)
+        if iter_time == 1:
+            return groups
+        output = []
+        need_process_groups = []
+        for i in range(iter_time - 1):
+            need_process_groups = []
+            for g in groups:
+                llm_num = self.get_token_sum(g)
+                if llm_num >= llm_thresh:
+                    output.append(g)
+                else:
+                    need_process_groups.extend(g)
+            if len(need_process_groups) >= 0:
+                groups = self.random_group(need_process_groups, self.seed + i, llm_max)
+            else:
+                break
+        if len(need_process_groups) > 0:
+            output.extend(self.random_group(need_process_groups, self.seed + i, llm_max))
+        return output
 
     def preprocess(self):
 
@@ -71,57 +142,19 @@ class PackedDataset(Dataset):
             from llm.utils.env import dist_env
             if dist_env.get_data_parallel_rank() == 0 and dist_env.get_tensor_model_parallel_rank() == 0 and dist_env.get_pipeline_model_parallel_rank() == 0: # noqa
                 np.save(self.length_path, self.lengths)
-
-    def accu_sample_len(self, seed=None):
-        """accumulative length of samples"""
-        pack_group_epoch = []
-        acm_len_samples_epoch = []
-        len_samples_shuffled_epoch = []
-        sample_indices_epoch = []
-        for epoch_idx in range(math.ceil(self.epoch)):
-            sample_indices = np.arange(len(self.lengths))
-            if seed is not None:
-                rng = np.random.RandomState(seed + epoch_idx + 1)
-            else:
-                rng = np.random.RandomState(self.seed + epoch_idx + 1)
-            rng.shuffle(sample_indices)
-            len_samples_shuffled = list(map(self.lengths.__getitem__, sample_indices))
-
-            pack_group = []
-            token_length_sum = 0
-            each_group = []
-            for sample_id, sample_length in enumerate(len_samples_shuffled):
-                token_length_sum += sample_length
-                if token_length_sum > self.packed_length:
-                    pack_group.append(each_group)
-                    token_length_sum = sample_length
-                    each_group = [sample_id]
-                else:
-                    each_group.append(sample_id)
-            acm_len_samples = list(it.accumulate(len_samples_shuffled, operator.add))
-            pack_group_epoch.extend(pack_group)
-            acm_len_samples_epoch.extend(acm_len_samples)
-            len_samples_shuffled_epoch.extend(len_samples_shuffled)
-            sample_indices_epoch.extend(sample_indices)
-        if isinstance(self.epoch, float):
-            exclued_num = (math.ceil(self.epoch) - int(self.epoch)) * len(self.lengths)
-            if exclued_num > 0:
-                sample_indices_epoch = sample_indices_epoch[:-exclued_num]
-                len_samples_shuffled_epoch = len_samples_shuffled_epoch[:-exclued_num]
-                acm_len_samples_epoch = acm_len_samples_epoch[:-exclued_num]
-                pack_group_epoch = pack_group_epoch[:-exclued_num]
-        return sample_indices_epoch, len_samples_shuffled_epoch, acm_len_samples_epoch, pack_group_epoch
+        self.tokens_lengths = [(idx, item) for idx, item in enumerate(self.lengths)]
 
     def __getitem__(self, item: int):
-        selected_inds = self.pack_group[item]
+        group = self.pack_group[item]
 
         input_ids = []
         labels = []
         cu_seqlens = [0]
         position_ids = []
-        for selected_ind in selected_inds:
-            index = self.sample_indices[selected_ind]
+        for g in group:
+            index, length = g
             meta = self.dataset.__getitem__(index)
+            assert len(meta["input_ids"]) == length
             input_ids.append(meta['input_ids'])
             labels.append(meta['labels'])
             cu_seqlens.append(len(meta['input_ids']))
