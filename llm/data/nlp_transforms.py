@@ -310,7 +310,7 @@ class InternToolParser(object):
                 if 'tool_calls' in item and len(item['tool_calls']) > 0:
                     assis_info += self.action_start
                     for tool_call in item['tool_calls']:
-                        if self.use_interpreter and 'name'in tool_call['function'] and tool_call['function']['name'] == "python_interpreter":
+                        if self.use_interpreter and 'name' in tool_call['function'] and tool_call['function']['name'] == "python_interpreter":
                             assis_info += f"{self.interpreter_prompt}\n{tool_call['function']['arguments']['code']}\n"      # noqa
                         else:
                             assis_info += f"{self.plugin_prompt}\n{json.dumps(tool_call['function'], ensure_ascii=self.ensure_ascii)}\n"
@@ -670,8 +670,220 @@ class GeneralChatParser(object):
         return results
 
 
+@PARSER_REGISTRY.register('general_chat_en')
+class EnglishGeneralChatParser(object):
+    def __init__(self,
+                 tokenizer,
+                 max_seq_length,
+                 ignore_index=-100,
+                 keep_all_keys=False,
+                 only_last_answer=False,
+                 prompt_template={},
+                 inference_mode=False,
+                 drop_meta=False):
+        self.tokenizer = tokenizer
+        self.ignore_index = ignore_index
+        self.keep_all_keys = keep_all_keys
+        self.max_seq_length = max_seq_length
+        self.only_last_answer = only_last_answer
+        self.system_prompt = prompt_template.get('system_prompt', "<system> ")
+        self.dialog_history_prompt = prompt_template.get('dialog_history_prompt', '<chat history> ')
+        self.question_prompt = prompt_template.get('question_prompt', "<new question> ")
+        self.knowledge_prompt = prompt_template.get('knowledge_prompt', "<reference content> ")
+        self.answer_prompt = prompt_template.get('answer_prompt', "SenseChat: ")
+        self.user_prompt = prompt_template.get('user_prompt', "user: ")
+        self.predefine_prompt = prompt_template.get('predefine_prompt', '')
+        self.system_prompt = self.system_prompt + self.predefine_prompt
+        self.inference_mode = inference_mode
+        self.drop_meta = drop_meta
+        # <system>  <history>  <knowledge>  <question>  <answer>
+
+    def convert2chat(self, meta):
+        new_meta = []
+        user, assistant = {}, {}
+        if 'system' in meta:
+            system = {}
+            system['role'] = 'system'
+            system['content'] = meta['system']
+            new_meta.append(system)
+        user['role'] = 'user'
+        user['content'] = meta.get('instruction', '') + meta.get('input', "")
+        assistant['role'] = 'assistant'
+        assistant['content'] = meta.get('output', "")
+        new_meta += [user, assistant]
+        return new_meta
+
+    def _process_meta(self, meta):
+        '''
+            process meta info:
+            return
+                system prompt
+                knowledge_prompt
+                history
+                question =  =
+                answer
+        '''
+        system_prompt_context = self.system_prompt
+        if isinstance(meta, dict):
+            if 'messages' in meta:
+                if 'system' in meta:
+                    system_prompt_context += meta['system']
+                meta = meta['messages']
+            if 'input' in meta:
+                meta = self.convert2chat(meta)
+        answer, question = "", ""
+        dialog_history = []
+        if len(meta) <= 1:
+            for item in meta:
+                if item['role'] == 'user':
+                    question += item.get('content', '')
+                if item['role'] == 'assistant':
+                    answer += item.get('content', '')
+        else:
+            if self.inference_mode:
+                question = meta[-1]['content'] + ' '  # Avoiding tokenization confusion, like "how to spell makeSenseChat:"
+                dialog_history = meta[:-1]
+            else:
+                answer = meta[-1]['content']
+                question = meta[-2]['content'] + ' '  # Avoiding tokenization confusion
+                dialog_history = meta[:-2]
+
+        knowledge_prompt_context = self.knowledge_prompt
+        for item in dialog_history:
+            if item['role'] == "system":
+                system_prompt_context += item['content']
+            if item['role'] == "knowledge":
+                knowledge_prompt_context += item['content']
+        rt_history = []
+        for hist in dialog_history:
+            if hist['role'] == "user" or hist['role'] == "assistant":
+                rt_history.append(hist)
+        return system_prompt_context, rt_history, knowledge_prompt_context, question, answer
+
+    def _get_system_tokens_labels(self, system):
+        tokens_system = self.tokenizer(system, return_attention_mask=False)['input_ids']
+        labels_system = [self.ignore_index] * len(tokens_system)
+        return tokens_system, labels_system
+
+    def _get_history_tokens_labels(self, history):
+        tokens_history = []
+        labels_history = []
+        for idx, item in enumerate(history):
+            if item['role'] == "user":
+                if idx == 0:
+                    user_context = "{}{}{} ".format(self.dialog_history_prompt, self.user_prompt, item['content'])  # Avoiding tokenization confusion
+                else:
+                    user_context = "{}{}".format(self.user_prompt, item['content'])
+                token_user_context = self.tokenizer(user_context, return_attention_mask=False, add_special_tokens=False)['input_ids']  # noqa
+                tokens_history += token_user_context
+                labels_history += [self.ignore_index] * len(token_user_context)
+            if item['role'] == "assistant":
+                if idx == 0:
+                    answer_prompt = "{}{}".format(self.dialog_history_prompt, self.answer_prompt)
+                    # assis_context = "{}{}{}".format(self.dialog_history_prompt, self.answer_prompt, item['content'])
+                else:
+                    answer_prompt = self.answer_prompt
+                tokens_answer_prompt = self.tokenizer(answer_prompt, return_attention_mask=False, add_special_tokens=False)['input_ids']  # noqa
+                labels_answer_prompt = [self.ignore_index] * len(tokens_answer_prompt)
+                tokens_answer = self.tokenizer(item['content'], return_attention_mask=False,
+                                               add_special_tokens=False)['input_ids']
+                if idx == 0:
+                    tokens_answer_label = [self.ignore_index] * len(tokens_answer)
+                else:
+                    tokens_answer_label = copy.deepcopy(tokens_answer)
+                tokens_answer += [self.tokenizer.eos_token_id]
+                tokens_answer_label += [self.tokenizer.eos_token_id]
+                token_assis_context = tokens_answer_prompt + tokens_answer
+                label_assis_context = labels_answer_prompt + tokens_answer_label
+
+                tokens_history += token_assis_context
+                labels_history += label_assis_context
+        return tokens_history, labels_history
+
+    def _get_knowledge_tokens_labels(self, knowledge):
+        tokens_knowledge = self.tokenizer(knowledge, return_attention_mask=False,
+                                          add_special_tokens=False)['input_ids']
+        labels_knowledge = [self.ignore_index] * len(tokens_knowledge)
+        return tokens_knowledge, labels_knowledge
+
+    def _get_question_tokens_labels(self, question):
+        new_question = "{}{}{} ".format(self.question_prompt, self.user_prompt, question)  # new version
+        # new_question = "{}{} ".format(self.question_prompt, question) # old version
+        tokens_question = self.tokenizer(new_question, return_attention_mask=False,
+                                         add_special_tokens=False)['input_ids']
+        labels_question = [self.ignore_index] * len(tokens_question)
+        return tokens_question, labels_question
+
+    def _get_answer_tokens_labels(self, answer):
+        tokens_answer_prompt = self.tokenizer(self.answer_prompt, return_attention_mask=False,
+                                              add_special_tokens=False)['input_ids']
+        labels_answer_prompt = [self.ignore_index] * len(tokens_answer_prompt)
+        tokens_answer = self.tokenizer(answer, return_attention_mask=False,
+                                       add_special_tokens=False)['input_ids']
+        if not self.inference_mode:
+            tokens_answer += [self.tokenizer.eos_token_id]
+        labels_answer = labels_answer_prompt + tokens_answer
+        tokens_answer = tokens_answer_prompt + tokens_answer
+        return tokens_answer, labels_answer
+
+    def build_inference_meta(self, text, history=[]):
+        meta_dict = {}
+        meta_dict['role'] = 'user'
+        meta_dict['content'] = text
+        meta = history + [meta_dict]
+        return meta
+
+    def get_tokens_labels(self, meta):
+        system, history, knowledge, question, answer = self._process_meta(meta)
+
+        tokens_system, labels_system = self._get_system_tokens_labels(system)
+        tokens_history, labels_history = self._get_history_tokens_labels(history)
+        tokens_knowledge, labels_knowledge = self._get_knowledge_tokens_labels(knowledge)
+        tokens_question, labels_question = self._get_question_tokens_labels(question)
+        tokens_answer, labels_answer = self._get_answer_tokens_labels(answer)
+
+        #  step1, clip history tokens from old to new
+        tokens = tokens_system + tokens_history + tokens_knowledge + tokens_question + tokens_answer
+        if len(tokens) > self.max_seq_length:
+            if self.drop_meta:
+                return None, None
+            outside_length = len(tokens) - (self.max_seq_length + 1)
+
+            tokens_history = tokens_history[outside_length:]
+            labels_history = labels_history[outside_length:]
+
+        tokens = tokens_system + tokens_history + tokens_knowledge + tokens_question + tokens_answer
+        if self.only_last_answer:
+            labels = [self.ignore_index] * len(labels_system + labels_history + labels_knowledge + labels_question) + labels_answer  # noqa
+        else:
+            labels = labels_system + labels_history + labels_knowledge + labels_question + labels_answer
+
+        # step2, clip answer (When the history tokens is not enough to clip)
+        if len(tokens) > self.max_seq_length:
+            tokens = tokens[:self.max_seq_length]
+            labels = labels[:self.max_seq_length]
+            if not self.inference_mode:
+                tokens += [self.tokenizer.eos_token_id]
+                labels += [self.tokenizer.eos_token_id]
+        return tokens, labels
+
+    def __call__(self, meta):
+        if self.inference_mode:
+            return self.get_tokens_labels(meta)
+        tokens, labels = self.get_tokens_labels(meta)
+        if tokens is None:
+            return None
+        input_ids = torch.LongTensor(tokens)
+        if self.keep_all_keys:
+            labels = input_ids.clone()
+        else:
+            labels = torch.LongTensor(labels)
+        results = {'input_ids': input_ids, 'labels': labels}
+        return results
+
+
 @PARSER_REGISTRY.register('combine_general_chat')
-class CombinedGeneralChatParser(GeneralChatParser):
+class CombinedGeneralChatParser(EnglishGeneralChatParser):
     """
     args are consistent with GeneralChatParser
     Combines the output of general_chat parsers in several conditions:
@@ -683,16 +895,17 @@ class CombinedGeneralChatParser(GeneralChatParser):
                  tokenizer,
                  max_seq_length,
                  **kwargs):
-        # self.default_parser = GeneralChatParser(**kwargs)
+        # self.default_parser = EnglishGeneralChatParser(**kwargs)
 
         super().__init__(tokenizer, max_seq_length, **kwargs)  # default parser is self
 
         updated_kwargs = dict(kwargs)
-        updated_kwargs.update({'only_last_answer': True})
-        self.last_answer_parser = GeneralChatParser(tokenizer, max_seq_length, **updated_kwargs)
+        updated_kwargs.update({'only_last_answer': True, 'keep_all_keys': False})
+        self.last_answer_parser = EnglishGeneralChatParser(tokenizer, max_seq_length, **updated_kwargs)
 
+        updated_kwargs = dict(kwargs)
         updated_kwargs.update({'only_last_answer': False, 'keep_all_keys': True})
-        self.keep_all_parser = GeneralChatParser(tokenizer, max_seq_length, **updated_kwargs)
+        self.keep_all_parser = EnglishGeneralChatParser(tokenizer, max_seq_length, **updated_kwargs)
 
     def __call__(self, meta):
         # meta type 1: [convs]
@@ -731,6 +944,19 @@ class CombinedDPOSFTParser(CombinedGeneralChatParser):
         results = {'input_ids': [yw_tokens, yl_tokens], 'labels': [yw_labels, yl_labels], 'scores': torch.FloatTensor([999999, 999999])}
         return results
 
+    def get_logp_score(self, y_logps, y_mask):
+        if len(y_logps) == len(y_mask) - 1:
+            y_logps = y_logps * y_mask[1:]
+        elif len(y_logps) == y_mask.sum(-1):
+            pass
+        else:
+            print('logp and y_mask not match')
+        if self.average_log_prob:
+            y_score = y_logps.sum(-1) / y_mask.sum(-1)
+        else:
+            y_score = y_logps.sum(-1)
+        return y_score
+
     def parse_dpo_pairs(self, meta):
         # DPO meta: {'yw':[convs], 'yl':[convs], 'yw_logp':[logp][1:], 'yl_logp':[logp][1:]}  only support one yw and one yl
         assert isinstance(meta['yw'], list) and isinstance(meta['yl'], list)
@@ -744,12 +970,8 @@ class CombinedDPOSFTParser(CombinedGeneralChatParser):
         yw_mask = yw_labels != self.ignore_index
         yl_mask = yl_labels != self.ignore_index
 
-        if self.average_log_prob:
-            yw_score = (yw_logp * yw_mask[1:]).sum(-1) / yw_mask[1:].sum(-1)  # LLMs output the probobilities from the second token
-            yl_score = (yl_logp * yl_mask[1:]).sum(-1) / yl_mask[1:].sum(-1)
-        else:
-            yw_score = (yw_logp * yw_mask[1:]).sum(-1)
-            yl_score = (yl_logp * yl_mask[1:]).sum(-1)
+        yw_score = self.get_logp_score(yw_logp, yw_mask)
+        yl_score = self.get_logp_score(yl_logp, yl_mask)
 
         results = {'input_ids': [yw_tokens, yl_tokens], 'labels': [yw_labels, yl_labels], 'scores': torch.FloatTensor([yw_score, yl_score])}
         return results

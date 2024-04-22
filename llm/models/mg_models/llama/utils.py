@@ -14,7 +14,7 @@ from llm.models.mg_models.base_modules.lora import (
     LoraVocabParallelEmbedding,
     LoraColumnParallelLinear,
     LoraRowParallelLinear)
-from llm.models.mg_models.llama.positional_embeddings import RotaryEmbedding
+from llm.models.mg_models.llama.positional_embeddings import RotaryEmbedding, LlamaDynamicYaRNScaledRotaryEmbedding
 
 
 def get_fp32_params_from_key(key, model, num_layers, lora_mode=False):
@@ -289,7 +289,7 @@ def load_func(filename, tp_rank, tp_world_size, model, num_layers, lora_mode, pr
         else:
             tensor = slice_[:]
 
-        if param is None and isinstance(module, RotaryEmbedding):
+        if param is None and (isinstance(module, RotaryEmbedding) or isinstance(module, LlamaDynamicYaRNScaledRotaryEmbedding)):
             continue
         elif param.shape != tensor.shape:
             print(param.shape, tensor.shape, module)

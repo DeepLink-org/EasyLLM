@@ -42,3 +42,4 @@ class PositionEmbeddingType(enum.Enum):
     alibi = 3
     flash = 4
     dynamicntk = 5
+    yarn = 6

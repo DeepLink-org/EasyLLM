@@ -93,7 +93,8 @@ def get_position_embedding_type(v):
                  'absolute': PositionEmbeddingType.absolute,
                  'alibi': PositionEmbeddingType.alibi,
                  'flash': PositionEmbeddingType.flash,
-                 'dynamicntk': PositionEmbeddingType.dynamicntk}[v]
+                 'dynamicntk': PositionEmbeddingType.dynamicntk,
+                 'yarn': PositionEmbeddingType.yarn}[v]
     return new_value
 
 
