@@ -303,13 +303,16 @@ class HFRunner(object):
         else:
             raise NotImplementedError
 
-    def save_checkpoint(self, save_cfg, global_step):
+    def save_checkpoint(self, save_cfg, global_step, start_dict=None):
         if save_cfg.get('enabled', True):
+            ds_config = self.config['deepspeed']['config']
+            if ds_config["zero_optimization"]["stage"] == 3:
+                state_dict = self.model._zero3_consolidated_16bit_state_dict()
             save_path = save_cfg.get('save_path', "checkpoints")
             assert save_path is not None, "Save path must be provided!!!"
             save_mode = save_cfg.get('save_mode', 'deepspeed')
             if save_mode == 'huggingface':
-                save_hf_checkpoint(self, save_cfg, global_step)
+                save_hf_checkpoint(self, save_cfg, global_step, state_dict=state_dict)
             elif save_mode == 'deepspeed':
                 save_ds_checkpoints(self, save_cfg, global_step)
             else:
