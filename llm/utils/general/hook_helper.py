@@ -8,6 +8,7 @@ from llm.utils.general.log_helper import default_logger as logger
 from llm.utils.general.registry_factory import HOOK_REGISTRY
 from llm.utils.env import dist_env
 from llm.utils.model.ckpt_helper import save_checkpoint
+from deepspeed import get_accelerator
 from .utils import Timers, report_memory
 
 
@@ -68,7 +69,7 @@ class TrainValLoggerHook(Hook):
         self.deepspeed = runner.deepspeed
         if tensorboard:
             self.tensorboard_writer = None
-            if dist_env.get_global_rank() == 0:
+            if dist_env.get_global_rank() == torch.distributed.get_world_size() - 1:
                 from tensorboardX import SummaryWriter
                 self.tensorboard_writer = SummaryWriter(log_dir=log_dir)
         else:
@@ -81,13 +82,16 @@ class TrainValLoggerHook(Hook):
           - input (dict): input to model
         """
         runner = self.runner_ref()
-        self.model_args['micro_batch_size'] = runner.model.transformer_layer_params['micro_batch_size']
-        self.model_args['seq_len'] = runner.model.transformer_layer_params['seq_length']
-        self.model_args['hidden_size'] = runner.model.transformer_layer_params['hidden_size']
-        self.model_args['num_layers'] = runner.model.model_kwargs['num_layers']
-        self.model_args['vocab_size'] = runner.model.word_embedings_params['vocab_size']
-        self.model_args['checkpoint_activations'] = runner.model.model_kwargs['checkpoint_activations']
-        self.model_args['glu_activation'] = runner.model.transformer_layer_params['glu_activation']
+        if hasattr(runner, 'set_hook_model_args'):
+            self.model_args.update(getattr(runner, 'set_hook_model_args')())
+        else:
+            self.model_args['micro_batch_size'] = runner.model.transformer_layer_params['micro_batch_size']
+            self.model_args['seq_len'] = runner.model.transformer_layer_params['seq_length']
+            self.model_args['hidden_size'] = runner.model.transformer_layer_params['hidden_size']
+            self.model_args['num_layers'] = runner.model.model_kwargs['num_layers']
+            self.model_args['vocab_size'] = runner.model.word_embedings_params['vocab_size']
+            self.model_args['checkpoint_activations'] = runner.model.model_kwargs['checkpoint_activations']
+            self.model_args['glu_activation'] = runner.model.transformer_layer_params['glu_activation']
         self.timers('train-iter-time').start()
 
     def after_train_iter(self, cur_iter, output={}):
@@ -102,7 +106,7 @@ class TrainValLoggerHook(Hook):
         got_nan = False
         for key in output:
             if '_loss' in key:
-                self.total_loss_dict[key] = self.total_loss_dict.get(key, torch.cuda.FloatTensor([0.0])) + output[key]
+                self.total_loss_dict[key] = self.total_loss_dict.get(key, get_accelerator().FloatTensor([0.0])) + output[key]
                 value = output[key].float().sum().item()
                 is_nan = value == float('inf') or \
                     value == -float('inf') or \
@@ -124,6 +128,7 @@ class TrainValLoggerHook(Hook):
                 loss_scale = runner.optimizer.get_loss_scale().item()
 
         params_norm = None
+        grad_norm = None
 
         data_parallel_size = dist_env.get_data_parallel_world_size()
 
@@ -171,10 +176,13 @@ class TrainValLoggerHook(Hook):
                         log_string += ' {}: {:.6E} |'.format(key, avg)
                         if self.tensorboard_writer is not None:
                             self.tensorboard_writer.add_scalar(f'train/{key}', avg, cur_iter)
-                    self.total_loss_dict[key] = torch.cuda.FloatTensor([0.0])
+                    self.total_loss_dict[key] = get_accelerator().FloatTensor([0.0])
             if self.fp16:
                 log_string += ' loss scale: {:.1f} |'.format(loss_scale)
-            grad_norm = runner.model.get_global_grad_norm()
+            if 'grad_norm' in output:
+                grad_norm = output['grad_norm'] 
+            else:
+                grad_norm = runner.model.get_global_grad_norm()
             if grad_norm is not None:
                 log_string += ' grad norm: {:.3f} |'.format(grad_norm)
             if params_norm is not None:

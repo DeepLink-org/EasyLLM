@@ -1,13 +1,17 @@
 import os
 import sys
 import random
-
+import stat
 import torch
 import numpy as np
 
 from llm.utils.env import dist_env
 from llm.utils.general.log_helper import default_logger as logger
+from deepspeed.accelerator import get_accelerator
 
+
+WRITE_FILE_DEFAULT_FLAGS = os.O_WRONLY | os.O_CREAT
+WRITE_FILE_DEFAULT_MODES = stat.S_IWUSR | stat.S_IRUSR
 
 def get_checkpoint_name(checkpoints_path, iteration, release=False):
     """A unified checkpoint name."""
@@ -95,7 +99,7 @@ def load_checkpoint(model, optimizer, num_microbatches_calculator,
             random.setstate(state_dict['random_rng_state'])
             np.random.set_state(state_dict['np_rng_state'])
             torch.set_rng_state(state_dict['torch_rng_state'])
-            torch.cuda.set_rng_state(state_dict['cuda_rng_state'])
+            get_accelerator().set_rng_state(state_dict['cuda_rng_state'])
             # Check for empty states array
             if not state_dict['rng_tracker_states']:
                 raise KeyError
@@ -122,15 +126,36 @@ def load_checkpoint(model, optimizer, num_microbatches_calculator,
     return iteration, consumed_train_samples, consumed_train_tokens
 
 
+def get_model_state_dict(model, state_dict):
+    if not isinstance(model, list):
+        model = [model]
+    if len(model) == 1:
+        state_dict['model'] = model[0].state_dict_for_save_checkpoint()
+    else:
+        for i in range(len(model)):
+            dist_env.set_virtual_pipeline_model_parallel_rank(i)
+            state_dict['model%d' % i] = model[i].state_dict_for_save_checkpoint()
+
+
+def save_checkpoint_post_process(save_path, iteration):
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+    # And update the latest iteration
+    if (not torch.distributed.is_initialized()) or (torch.distributed.get_rank() == 0):
+        tracker_filename = os.path.join(save_path, 'latest_checkpointed_iteration.txt')
+        with os.fdopen(os.open(tracker_filename, WRITE_FILE_DEFAULT_FLAGS, WRITE_FILE_DEFAULT_MODES), 'w') as f:
+            f.write(str(iteration))
+
+
 def save_checkpoint(iteration, consumed_train_samples, consumed_train_tokens, model,
-                    cfg_saver, lora_mode=False, cfg_lora=None):
+                    cfg_saver, lora_mode=False, cfg_lora=None, optimizer=None, lr_scheduler=None):
     """Save a model checkpoint."""
     # Only rank zero of the data parallel writes to the disk.
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
-
+    
     logger.info('saving checkpoint at iteration {:7d} to {}'.format(iteration, cfg_saver['save_path']))      # noqa
-
     if lora_mode and cfg_lora and cfg_lora.get('saver', None):
         assert hasattr(model, 'save_lora_ckpt_pretrained'), 'model has no save_lora_ckpt_pretrained func!'
         model.save_lora_ckpt_pretrained(cfg_lora, model, iteration=iteration)
@@ -140,16 +165,11 @@ def save_checkpoint(iteration, consumed_train_samples, consumed_train_tokens, mo
         if cfg_lora['saver'].get('only_save_trainable', False):
             return
 
-    save_mode = cfg_saver.get("save_mode", "deepspeed")
-    logger.info('Save Checkpoint in the {} Mode...'.format(save_mode))
-    if (save_mode != 'deepspeed'):
-        assert hasattr(model, 'save_ckpt_pretrained'), 'if the model do not save by the deepspeed mode, it must provide a save_ckpt_pretrained fn'      # noqa
-        model.save_ckpt_pretrained(cfg_saver, model)
-        # Wait so everyone is done (necessary)
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier()
-        return
-
+    # Saving is a collective communication
+    checkpoint_path = get_checkpoint_name(cfg_saver['save_path'], iteration)
+    # Trim off the filename and mp_rank_* directory.
+    for _ in range(3):
+        checkpoint_name = os.path.dirname(checkpoint_path)
     # Arguments, iteration, and model.
     state_dict = {}
     # state_dict['args'] = args
@@ -164,14 +184,26 @@ def save_checkpoint(iteration, consumed_train_samples, consumed_train_tokens, mo
         state_dict['random_rng_state'] = random.getstate()
         state_dict['np_rng_state'] = np.random.get_state()
         state_dict['torch_rng_state'] = torch.get_rng_state()
-        state_dict['cuda_rng_state'] = torch.cuda.get_rng_state()
+        state_dict['cuda_rng_state'] = get_accelerator().get_rng_state()
         state_dict['rng_tracker_states'] = dist_env.get_cuda_rng_tracker().get_states()      # noqa
 
-    # Saving is a collective communication
-    checkpoint_name = get_checkpoint_name(cfg_saver['save_path'], iteration)
-    # Trim off the filename and mp_rank_* directory.
-    for _ in range(3):
-        checkpoint_name = os.path.dirname(checkpoint_name)
+    save_mode = cfg_saver.get("save_mode", "deepspeed")
+    logger.info('Save Checkpoint in the {} Mode...'.format(save_mode))
+
+    if (save_mode != 'deepspeed'):
+        if  not torch.distributed.is_initialized() or dist_env.get_data_parallel_rank() == 0:
+            if cfg_saver.get('save_optim', False) and optimizer is not None:
+                state_dict['optimizer'] = optimizer.state_dict()
+            if cfg_saver.get('save_lr_shceduler', False) and lr_scheduler is not None:
+                state_dict['lr_scheduler'] = lr_scheduler.state_dict()
+            get_model_state_dict(model, state_dict)
+            if not os.path.exists(os.path.dirname(checkpoint_path)):
+                os.makedirs(os.path.dirname(checkpoint_path))
+            torch.save(state_dict, checkpoint_path)
+        save_checkpoint_post_process(cfg_saver['save_path'], iteration)
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        return
 
     # if not only save lora.
     if (not lora_mode) or (not cfg_lora) or (not cfg_lora.get('only_save_trainable', False)):

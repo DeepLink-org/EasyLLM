@@ -39,6 +39,9 @@ def is_master():
         return True
     return dist.get_rank() == 0
 
+def is_laster():
+    return dist.get_rank() == (dist.get_world_size() - 1)
+
 
 def basicConfig(*args, **kwargs):
     return
@@ -78,7 +81,7 @@ def init_log(name='global', level=logging.INFO):
     ch = logging.StreamHandler(stream=sys.stdout)
     ch.setLevel(level)
     format_str = f'%(asctime)s-rk{MASTER_RANK}-%(filename)s#%(lineno)d:%(message)s'
-    logger.addFilter(lambda record: is_master())
+    logger.addFilter(lambda record: is_laster())
     formatter = ColoredFormatter(format_str)
     ch.setFormatter(formatter)
     logger.addHandler(ch)

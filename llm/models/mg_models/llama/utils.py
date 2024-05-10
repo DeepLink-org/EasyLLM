@@ -303,7 +303,6 @@ def load_func(filename, tp_rank, tp_world_size, model, num_layers, lora_mode, pr
             param.data.copy_(tensor)
         init_set.add(name)
 
-
 def load_llama_from_hf_format(load_dir,
                               model, optimizer,
                               num_layers, lora_mode=False,

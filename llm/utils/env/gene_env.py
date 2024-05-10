@@ -6,6 +6,7 @@ import numpy as np
 
 from llm.utils.env import dist_env
 from llm.utils.general import log_helper as logging
+from deepspeed.accelerator import get_accelerator
 
 
 def setup_deepspeed_random_and_activation_checkpointing(base_num_layers,
@@ -85,7 +86,7 @@ def set_random_seed(seed_, dp_random_init=False):
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        if torch.cuda.device_count() > 0:
+        if get_accelerator().device_count() > 0:
             dist_env.model_parallel_cuda_manual_seed(seed)
     else:
         raise ValueError('Seed ({}) should be a positive integer.'.format(seed))       # noqa

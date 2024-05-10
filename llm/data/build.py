@@ -3,6 +3,7 @@ import torch
 from llm.utils.env import dist_env
 
 from .nlp_dataloader import build_data_loader
+from deepspeed.accelerator import get_accelerator
 
 
 def cyclic_iter(iter):
@@ -28,10 +29,10 @@ def build_data_iterator(tokenizer, cfg_data, consumed_train_samples, data_type):
     # build data loader
     if dist_env.get_tensor_model_parallel_rank() == 0:
         dataloader = build_data_loader(cfg_data[data_type], tokenizer)
-        flags = torch.cuda.LongTensor([len(dataloader)])
+        flags = get_accelerator().LongTensor([len(dataloader)])
     else:
         dataloader = None
-        flags = torch.cuda.LongTensor([0])
+        flags = get_accelerator().LongTensor([0])
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
     torch.distributed.broadcast(flags, dist_env.get_tensor_model_parallel_src_rank(),

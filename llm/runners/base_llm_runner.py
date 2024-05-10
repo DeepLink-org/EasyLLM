@@ -271,7 +271,6 @@ class BaseRunner(object):
             self.model.set_train_batch_size(global_batch_size)
             # forward step
             output = self.forward_step(self.data_iterators[data_type])
-
             self.consumed_train_samples += global_batch_size
             self.consumed_train_tokens += global_batch_size * seq_length
             if hasattr(self.lr_scheduler, 'consumed_train_tokens'):

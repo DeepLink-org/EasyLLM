@@ -162,12 +162,51 @@ class JsonBatchFunction(object):
             prefix_indices=self.prefix_indices,
             loss_on_targets_only=self.loss_on_targets_only
         )
-
+        loss_mask = torch.where(labels == -100, 0, 1)
         if self.hf_atten_mask:
             attention_mask = get_peft_attention_mask(tokens, self.pad_token_id)
 
         return (tokens, position_ids, attention_mask), (labels, loss_mask)
 
+@BATCH_FN_REGISTRY.register('json_batch_seq')
+class JsonBatchFunction(object):
+    def __init__(self, tokenizer, reset_position_ids, reset_attention_mask,
+                 eod_mask_loss=True, prefix_indices=None, loss_on_targets_only=True,
+                 hf_atten_mask=False):
+        self.tokenizer = tokenizer
+        self.reset_position_ids = reset_position_ids
+        self.reset_attention_mask = reset_attention_mask
+        self.eod_mask_loss = eod_mask_loss
+        self.prefix_indices = prefix_indices
+        self.loss_on_targets_only = loss_on_targets_only
+        self.hf_atten_mask = hf_atten_mask
+        self.pad_token_id = len(self.tokenizer) - 1
+
+    def __call__(self, data):
+        # Items and their type.
+        keys = ['labels', 'input_ids', 'attention_mask']
+        datatype = torch.int64
+        # Broadcast data.
+        data_b = dist_env.broadcast_data(keys, data, datatype)
+
+        labels = data_b['labels'].long()
+        tokens = data_b['input_ids'].long()
+        attention_mask_ori = data_b['attention_mask'].long()
+        att_mask_batch = 1
+        _, seq_length = tokens.size()
+        # Get the masks and position ids.
+        attention_mask = torch.tril(torch.ones(
+            (att_mask_batch, seq_length, seq_length), device=attention_mask_ori.device)).view(
+            att_mask_batch, 1, seq_length, seq_length)
+        attention_mask = attention_mask.masked_fill((attention_mask_ori < 0.5).view(-1, 1, 1, seq_length), value=0)
+        attention_mask = (attention_mask < 0.5)
+        loss_mask = torch.where(labels == -100, 0, 1)
+        position_ids = torch.arange(seq_length, dtype=torch.long,
+                                    device=tokens.device)
+        position_ids = position_ids.unsqueeze(0).expand_as(tokens)
+        if self.hf_atten_mask:
+            attention_mask = get_peft_attention_mask(tokens, self.pad_token_id)
+        return (tokens, position_ids, attention_mask), (labels, loss_mask)
 
 @BATCH_FN_REGISTRY.register('flash_batch_pipe')
 class FlashBatchFunction(object):

@@ -4,7 +4,8 @@ import torch
 
 from llm.utils.env import dist_env
 from llm.utils.general.microbatches import RampupBatchsizeNumMicroBatches
-
+from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
+from deepspeed import get_accelerator
 
 class _Timer:
     """Timer."""
@@ -96,13 +97,13 @@ def report_memory(name):
     mega_bytes = 1024.0 * 1024.0
     string = name + ' memory (MB)'
     string += ' | allocated: {}'.format(
-        torch.cuda.memory_allocated() / mega_bytes)
+        get_accelerator().memory_allocated() / mega_bytes)
     string += ' | max allocated: {}'.format(
-        torch.cuda.max_memory_allocated() / mega_bytes)
+        get_accelerator().max_memory_allocated() / mega_bytes)
     string += ' | reserved: {}'.format(
-        torch.cuda.memory_reserved() / mega_bytes)
+        get_accelerator().memory_reserved() / mega_bytes)
     string += ' | max reserved: {}'.format(
-        torch.cuda.max_memory_reserved() / mega_bytes)
+        get_accelerator().max_memory_reserved() / mega_bytes)
     if dist_env.get_data_parallel_rank() == 0:
         print("[Rank {}] {}".format(torch.distributed.get_rank(), string), flush=True)
 
@@ -130,3 +131,19 @@ def get_train_iters(num_microbatches_calculator, train_iters=None, train_samples
             iterations += (train_samples - consumed_samples) // global_batch_size
             train_iters = iterations
     return train_iters
+
+
+def unwrap_model(model, module_instances=(torchDDP)):
+    return_list = True
+    if not isinstance(model, list):
+        model = [model]
+        return_list = False
+    unwrapped_model = []
+    for model_module in model:
+        while isinstance(model_module, module_instances):
+            model_module = model_module.module
+        unwrapped_model.append(model_module)
+    if not return_list:
+        return unwrapped_model[0]
+    return unwrapped_model
+

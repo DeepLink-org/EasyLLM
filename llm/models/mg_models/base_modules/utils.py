@@ -124,13 +124,19 @@ def attention_mask_func(attention_scores, attention_mask):
     attention_scores.masked_fill_(attention_mask, torch.finfo(attention_scores.dtype).min)
     return attention_scores
 
-
 def unwrap_model(model, module_instances=(torchDDP)):
-    unwrapped_model = model
-    while isinstance(model, module_instances):
-        unwrapped_model = model.module
+    return_list = True
+    if not isinstance(model, list):
+        model = [model]
+        return_list = False
+    unwrapped_model = []
+    for model_module in model:
+        while isinstance(model_module, module_instances):
+            model_module = model_module.module
+        unwrapped_model.append(model_module)
+    if not return_list:
+        return unwrapped_model[0]
     return unwrapped_model
-
 
 def log_trainable_params(model):
     if dist_env.get_tensor_model_parallel_rank() == 0:

@@ -3,6 +3,8 @@ import time
 import itertools
 from typing import Dict, Sequence
 from dataclasses import dataclass
+from transformers import DataCollatorForSeq2Seq
+
 
 import torch
 from torch.utils.data import DataLoader
@@ -46,10 +48,46 @@ class BatchCollector(object):
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         input_ids, labels = tuple([instance[key] for instance in instances] for key in ("input_ids", "labels"))
         input_ids, labels = self._pad_func(input_ids, labels)
+    
+        from ascend.dd import show_l_tensor, show_r_tensor, show_sum_tensor, show_info_tensor, print_all_rank
+        print_all_rank(f"BatchCollector {show_info_tensor('input_ids', input_ids, 5, -5, True)}", True)
+        print_all_rank(f"BatchCollector {show_info_tensor('labels', labels, 5, -5, True)}", True)
         return dict(
             input_ids=input_ids,
             labels=labels,
             attention_mask=input_ids.ne(self.pad_token_id),
+        )
+
+@dataclass
+@BATCH_COLLECTOR_REGISTRY.register('batch_seq')
+class BatchCollector(object):
+    def __init__(self,
+                 tokenizer,
+                 ignore_idx=-100,
+                 max_seq_length=2048,
+                 offset_label=False):
+        self.tokenizer = tokenizer
+        self.ignore_idx = ignore_idx
+        self.max_seq_length = max_seq_length
+        self.pad_token_id = len(self.tokenizer) - 1
+        self.offset_label = offset_label
+
+        self.collator = DataCollatorForSeq2Seq(
+            tokenizer,
+            pad_to_multiple_of=max_seq_length,
+            return_tensors='pt',
+            padding=True
+        )
+
+    def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        instances = self.collator(instances)
+        input_ids, labels, attention_mask = instances["input_ids"], instances["labels"], instances["attention_mask"]
+        return dict(
+            input_ids=input_ids,
+            labels=labels,
+            attention_mask=attention_mask
         )
 
 
