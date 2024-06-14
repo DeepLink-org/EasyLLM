@@ -69,6 +69,7 @@ WEIGHTS_WITH_COLUMN_PARALLELISM_CONTAIN = [
 
 WEIGHTS_WITH_PACK_COLUMN_PARALLELISM_CONTAIN = [
     "self_attn.wqkv.weight",
+    "self_attn.wqkv.bias"
 ]
 
 LORA_WEIGHTS_WITH_COLUMN_PARALLELISM_CONTAIN = [
@@ -526,6 +527,16 @@ def write_model_fast(args):
                            index_dict=index_dict,
                            save_intern=args.save_intern)
     worker = int(os.environ.get('LOADWORKER', 8))
+    # for layers_tp in layers_tps:
+    #     load_save_func(layers_tp,
+    #                    tp_size=tp_size,
+    #                    output_dir=model_path,
+    #                    n_layer=n_layer,
+    #                         n_heads=args.n_heads,
+    #                         num_key_value_heads=args.num_key_value_heads,
+    #                         param_counts=param_counts,
+    #                         index_dict=index_dict,
+    #                         save_intern=args.save_intern)
     with Pool(worker) as p:
         _ = p.map(partial_func, layers_tps)
     param_count = sum(param_counts)
