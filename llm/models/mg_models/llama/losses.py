@@ -10,12 +10,18 @@ from llm.utils.general.log_helper import default_logger as logger
 
 @LOSS_REGISTRY.register('softmax_cross_entropy')
 class CrossEntropy(object):
-    def __init__(self, loss_on_targets_only=False, reweight_loss_based_on_position_frequency=False,
-                 is_prefix=True, cut_size=None, **kwargs):
+    def __init__(self,
+                 loss_on_targets_only=False,
+                 reweight_loss_based_on_position_frequency=False,
+                 is_prefix=True,
+                 cut_size=None,
+                 dp_reduce=False,
+                 **kwargs):
         self.loss_on_targets_only = loss_on_targets_only
         self.reweight_loss_based_on_position_frequency = reweight_loss_based_on_position_frequency
         self.is_prefix = is_prefix
         self.cut_size = cut_size
+        self.dp_reduce = dp_reduce
 
     def get_expected_number_of_tokens(self, labels, loss_mask):
         ignore_mask = (labels == IGNORE_INDEX)
@@ -43,20 +49,21 @@ class CrossEntropy(object):
             expected_number_of_tokens = average_tokens_per_sample * micro_batch_size
         else:
             expected_number_of_tokens = loss_mask.sum()
+        if self.dp_reduce:
+            dist.all_reduce(expected_number_of_tokens, group=dist_env.get_data_parallel_group(), op=dist.ReduceOp.AVG)
         return expected_number_of_tokens, loss_mask
 
     def __call__(self, output, labels):
         labels, loss_mask = labels[0], labels[1]
-        if (labels == -100).all():
-            bs, s = labels.shape
-            ignore_mask = (labels != -100).view(-1)
-            loss = output.view(bs * s, -1)[ignore_mask].sum()
-            return loss
-        losses = vocab_parallel_cross_entropy(output.contiguous().float(),
-                                              labels, self.cut_size)
         expected_number_of_tokens, loss_mask = self.get_expected_number_of_tokens(labels, loss_mask)
+        if ((labels == -100).all():
+            bs, d = labels.shape
+            ignore_mask = (labels != -100).view(-1)
+            loss = output.view(bs * d, -1)[ignore_mask].sum()
+        else:
+            losses = vocab_parallel_cross_entropy(output.contiguous().float(), labels, self.cut_size)
+            loss = torch.sum(losses.view(-1) * loss_mask) / expected_number_of_tokens
 
-        loss = torch.sum(losses.view(-1) * loss_mask) / expected_number_of_tokens
         return loss
 
 
