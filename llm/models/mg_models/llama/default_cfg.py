@@ -1,3 +1,4 @@
+import torch
 import copy
 # import torch
 # from ..modules.enums import AttnMaskType
@@ -145,7 +146,7 @@ def update_ln_config(cfg, shared_default):
     for lnk in shared_keys_mapping:
         sk = shared_keys_mapping[lnk]
         # if lnk in cfg:
-            # assert cfg[lnk] == shared_default[sk], "the key value of {} does not match with the shared configs and layer norm configs".format(lnk)        # noqa
+        # assert cfg[lnk] == shared_default[sk], "the key value of {} does not match with the shared configs and layer norm configs".format(lnk)        # noqa
         ln_defualt.update({lnk: shared_default[sk]})
     ln_defualt.update(cfg)
     return ln_defualt
@@ -178,8 +179,24 @@ _TRANSFROMER_LAYER_DEFAULT_CONFIG = {
 }
 
 
-def update_transformer_layer_config(cfg, shared_default, ln_cfg, num_layers):
+_TRANSFROMER_ENGINE_DEFAULT_CONFIG = {
+    'te_apply_rope_fusion': False,
+    'te_use_cpu_initialization': None,
+    'te_gradient_accumulation_fusion': True,
+    'te_deallocate_pipeline_outputs': True,
+    'te_gated_linear_unit': True,
+    'te_attention_softmax_in_fp32': True,
+    'te_bias_activation_fusion': True,
+    'te_masked_softmax_fusion': False,
+    'te_persist_layer_norm': True,
+    'te_bias_dropout_fusion': False,
+    'te_distribute_saved_activations': False
+}
+
+
+def update_transformer_layer_config(cfg, shared_default, ln_cfg, num_layers, cfg_engine):
     transformer_layer_defualt = copy.deepcopy(_TRANSFROMER_LAYER_DEFAULT_CONFIG)
+    transformer_engine_defualt = copy.deepcopy(_TRANSFROMER_ENGINE_DEFAULT_CONFIG)
     shared_keys_mapping = {"self_attn_mask_type": "attn_mask_type",
                            "position_embedding_type": "position_embedding_type",
                            "position_embedding_kwargs": "position_embedding_kwargs",
@@ -202,18 +219,56 @@ def update_transformer_layer_config(cfg, shared_default, ln_cfg, num_layers):
     for tlk in shared_keys_mapping:
         sk = shared_keys_mapping[tlk]
         # if tlk in cfg:
-            # assert cfg[tlk] == shared_default[sk], "the key value of {} does not match with the shared configs and transformer layer configs".format(tlk)        # noqa
+        # assert cfg[tlk] == shared_default[sk], "the key value of {} does not match with the shared configs and transformer layer configs".format(tlk)        # noqa
         transformer_layer_defualt.update({tlk: shared_default[sk]})
     transformer_layer_defualt.update(cfg)
     if transformer_layer_defualt["layer_norm"] is None:
         transformer_layer_defualt["layer_norm"] = ln_cfg
     if transformer_layer_defualt["output_initializer"]["kwargs"].get("num_layers", None):
         transformer_layer_defualt["output_initializer"]["kwargs"]["num_layers"] = num_layers
+    transformer_engine_defualt.update(cfg_engine)
     # Assert Activation Function
     glu_activation = transformer_layer_defualt['glu_activation']
     bias_gelu_fusion = transformer_layer_defualt['bias_gelu_fusion']
     if glu_activation is not None and bias_gelu_fusion:
         raise ValueError("if glu-activation is used, please set bias-gelu-fusion to false")
+
+    # transformer_engine config
+    from llm.utils.env import dist_env
+    from .transformer_config import TransformerConfig
+    if shared_default["params_dtype"] == "float16":
+        te_params_dtype = torch.float16
+    elif shared_default["params_dtype"] == "bfloat16":
+        te_params_dtype = torch.bfloat16
+    transformer_engine_config = TransformerConfig(
+        tensor_model_parallel_size=dist_env.get_tensor_model_parallel_world_size(),
+        pipeline_model_parallel_size=dist_env.get_pipeline_model_parallel_world_size(),
+        context_parallel_size=dist_env.get_context_parallel_world_size(),
+        bf16=shared_default["bf16"],
+        params_dtype=te_params_dtype,  # torch.bfloat16,
+        autocast_dtype=te_params_dtype,  # torch.bfloat16,
+        num_layers=shared_default["num_layers"],
+        hidden_size=shared_default["hidden_size"],
+        num_attention_heads=shared_default["num_attention_heads"],
+        num_query_groups=shared_default["num_kv_attention_heads"],
+        ffn_hidden_size=shared_default["intermediate_size"],
+        kv_channels=shared_default["kv_channels"],
+        layernorm_epsilon=_LAYER_NORM_DEFAULT_CONFIG["eps"],  # 1e-05,
+        pipeline_dtype=te_params_dtype,  # torch.bfloat16,
+        apply_rope_fusion=transformer_engine_defualt["te_apply_rope_fusion"],  # True,
+        sequence_parallel=shared_default["sequence_parallel"],
+        use_cpu_initialization=transformer_engine_defualt["te_use_cpu_initialization"],
+        gradient_accumulation_fusion=transformer_engine_defualt["te_gradient_accumulation_fusion"],
+        deallocate_pipeline_outputs=transformer_engine_defualt["te_deallocate_pipeline_outputs"],
+        gated_linear_unit=transformer_engine_defualt["te_gated_linear_unit"],
+        attention_softmax_in_fp32=transformer_engine_defualt["te_attention_softmax_in_fp32"],  # False
+        bias_activation_fusion=transformer_engine_defualt["te_bias_activation_fusion"],
+        masked_softmax_fusion=transformer_engine_defualt["te_masked_softmax_fusion"],  # True,
+        persist_layer_norm=transformer_engine_defualt["te_persist_layer_norm"],
+        bias_dropout_fusion=transformer_engine_defualt["te_bias_dropout_fusion"],  # True,
+        distribute_saved_activations=transformer_engine_defualt["te_distribute_saved_activations"]
+    )
+    transformer_layer_defualt["transformer_engine_config"] = transformer_engine_config
     return transformer_layer_defualt
 
 
@@ -233,6 +288,7 @@ def update_model_cfg(cfg):
     word_embedings_cfg = cfg.pop('word_embedings_params', {})
     layer_norm_cfg = cfg.pop('layer_norm_params', {})
     transformer_layer_cfg = cfg.pop('transformer_layer_params', {})
+    transformer_engine_cfg = cfg.pop('transformer_engine_params', {})
     lm_head_cfg = cfg.pop('lm_head_params', {})
     loss_cfg = cfg.pop('loss_params', {})
 
@@ -242,7 +298,7 @@ def update_model_cfg(cfg):
     layer_norm_cfg['type'] = layer_norm_cfg.get('type', 'rms_norm')
     layer_norm_cfg['kwargs'] = update_ln_config(layer_norm_cfg.get('kwargs', {}), shared_cfg)
     transformer_layer_cfg = update_transformer_layer_config(transformer_layer_cfg, shared_cfg,
-                                                            layer_norm_cfg, num_layers=cfg['num_layers'])
+                                                            layer_norm_cfg, num_layers=cfg['num_layers'], cfg_engine=transformer_engine_cfg)
     lm_head_cfg = update_embeding_config(lm_head_cfg, shared_cfg, as_head=True)
 
     loss_cfg['type'] = loss_cfg.get('type', 'softmax_cross_entropy')

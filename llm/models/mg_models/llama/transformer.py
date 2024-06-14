@@ -63,6 +63,9 @@ except ImportError:
     unpad_input, pad_input = None, None
 
 
+from .transformer_engine import TEDotProductAttention
+
+
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
@@ -278,7 +281,11 @@ class ParallelAttention(MegatronModule):
                  use_matmul=False,
                  qkv_pack=False,
                  qkv_bias=False,
-                 o_bias=False):
+                 o_bias=False,
+                 transformer_engine_config=None,
+                 te_layer_number=1,
+                 te_attention_type="self",
+                 te_attention_dropout=0.0):
         super(ParallelAttention, self).__init__()
         self.fp16 = fp16
         self.bf16 = bf16
@@ -434,6 +441,14 @@ class ParallelAttention(MegatronModule):
                 **position_embedding_kwargs or {},
             )
 
+        self.te_core_attention = TEDotProductAttention(
+            config=transformer_engine_config,
+            layer_number=te_layer_number,
+            attn_mask_type=AttnMaskType(self.attn_mask_type),
+            attention_type=te_attention_type,
+            attention_dropout=te_attention_dropout
+        )
+
     def forward(self,
                 hidden_states,
                 attention_mask,
@@ -464,6 +479,7 @@ class ParallelAttention(MegatronModule):
             query_layer = query_layer.reshape(sq, bs * nq_head, -1)
             # [sk, b, np, hn] -> [sk, b * np, hn]
             key_layer = key_layer.reshape(sk, bs * nk_head, -1)
+            value_layer = value_layer.reshape(sk, bs * nk_head, -1)
             apply_rotary_fn = apply_rotary_pos_emb_torch if self.bf16 else apply_rotary_pos_emb
 
             seq_len = key_layer.shape[0]
@@ -496,7 +512,19 @@ class ParallelAttention(MegatronModule):
                                                      max_seqlen=max_seqlen,
                                                      seqlen_offset=offset)
 
-        if self.use_flash_attn:
+        self.context_parallel_size = dist_env.get_context_parallel_world_size()
+        if self.context_parallel_size > 1:
+            query_layer = query_layer.view(sq, bs, nq_head, -1)
+            key_layer = key_layer.view(sk, bs, nk_head, -1)
+            value_layer = value_layer.view(sk, bs, nk_head, -1)
+            context_layer = self.te_core_attention(
+                query_layer,
+                key_layer,
+                value_layer,
+                attention_mask,
+                attn_mask_type=AttnMaskType(self.attn_mask_type),
+            )
+        elif self.use_flash_attn:
             if self.position_embedding_type != PositionEmbeddingType.flash:
                 # [sq, b * np, hn] --> [sq, b, np, hn]
                 query_layer = query_layer.reshape(sq, bs, nq_head, -1)
@@ -709,6 +737,7 @@ class ParallelTransformerLayer(MegatronModule):
                  qkv_pack=False,
                  attention_qkv_bias=False,
                  attention_o_bias=False,
+                 transformer_engine_config=None,
                  ):
 
         super(ParallelTransformerLayer, self).__init__()
@@ -758,6 +787,7 @@ class ParallelTransformerLayer(MegatronModule):
         self.self_attn = ParallelAttention(
             attention_type=AttnType.self_attn,
             attn_mask_type=get_attn_mask_type(self_attn_mask_type),
+            transformer_engine_config=transformer_engine_config,
             **default_parallel_attn_params)
         self.hidden_dropout = hidden_dropout
         self.bias_dropout_fusion = bias_dropout_fusion

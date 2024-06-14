@@ -4,6 +4,31 @@ from llm.utils.env import dist_env
 from llm.utils.general.registry_factory import BATCH_FN_REGISTRY
 
 
+def get_batch_on_this_cp_rank(batch):
+    # cp_size = dist_env.get_tensor_model_parallel_world_size()
+    cp_size = dist_env.get_context_parallel_world_size()
+    if cp_size > 1:
+        cp_rank = dist_env.get_context_parallel_rank()
+        for key, val in batch.items():
+            # seq_dim = 1 if key != 'attention_mask' else 2
+            seq_dim = 1
+            val = val.view(
+                *val.shape[0:seq_dim],
+                2 * cp_size,
+                val.shape[seq_dim] // (2 * cp_size),
+                *val.shape[(seq_dim + 1) :],
+            )
+            index = torch.tensor([cp_rank, (2 * cp_size - cp_rank - 1)],
+                                 device="cpu", pin_memory=True).cuda(non_blocking=True)
+            # index = torch.tensor([cp_rank, (2 * cp_size - cp_rank - 1)],
+            #                      device="cpu") # .cuda(non_blocking=True)
+            val = val.index_select(seq_dim, index)
+            val = val.view(*val.shape[0:seq_dim], -1, *val.shape[(seq_dim + 2) :])
+            batch[key] = val
+
+    return batch
+
+
 @BATCH_FN_REGISTRY.register('flash_batch_pipe')
 class FlashBatchFunction(object):
     def __init__(self,
@@ -31,6 +56,16 @@ class FlashBatchFunction(object):
             position_ids = torch.arange(seq_length, dtype=torch.long,
                                         device=tokens.device)
             position_ids = position_ids.unsqueeze(0).expand_as(tokens)
+            batch = {
+                "tokens": tokens,
+                "position_ids": position_ids,
+                "attention_mask": attention_mask,
+                "labels": labels,
+                "loss_mask": loss_mask
+            }
+            batch = get_batch_on_this_cp_rank(batch)
+            tokens, position_ids, attention_mask, labels, loss_mask = \
+                batch["tokens"], batch["position_ids"], batch["attention_mask"], batch["labels"], batch["loss_mask"]
             return (tokens, position_ids, attention_mask), (labels, loss_mask)
         else:
             cu_seqlens = data_b['cu_seqlens']

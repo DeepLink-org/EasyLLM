@@ -26,6 +26,7 @@ from .memory_buffer import GlobalMemoryBuffer
 _TENSOR_MODEL_PARALLEL_GROUP = None
 # Inter-layer model parallel group that the current rank belongs to.
 _PIPELINE_MODEL_PARALLEL_GROUP = None
+_CONTEXT_PARALLEL_GROUP = None
 # Model parallel group (both intra- and pipeline) that the current rank belongs to.
 _MODEL_PARALLEL_GROUP = None
 # Embedding group.
@@ -39,8 +40,12 @@ _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
 # These values enable us to change the mpu sizes on the fly.
 _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = None
 _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
+_MPU_CONTEXT_PARALLEL_WORLD_SIZE = None
 _MPU_TENSOR_MODEL_PARALLEL_RANK = None
 _MPU_PIPELINE_MODEL_PARALLEL_RANK = None
+_MPU_CONTEXT_PARALLEL_RANK = None
+
+_CONTEXT_PARALLEL_GLOBAL_RANKS = None
 
 # A list of global ranks for each pipeline group to ease calculation of the source
 # rank when broadcasting from the first or last pipeline stage
@@ -57,6 +62,7 @@ def is_unitialized():
 
 def initialize_model_parallel(tensor_model_parallel_size_=1,
                               pipeline_model_parallel_size_=1,
+                              context_parallel_size_=1,
                               virtual_pipeline_model_parallel_size_=None):
     """
     Initialize model data parallel groups.
@@ -86,13 +92,19 @@ def initialize_model_parallel(tensor_model_parallel_size_=1,
             tensor_model_parallel_size_))
         print('> initializing pipeline model parallel with size {}'.format(
             pipeline_model_parallel_size_))
+        print('> initializing context parallel with size {}'.format(
+            context_parallel_size_))
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
     world_size = torch.distributed.get_world_size()
     tensor_model_parallel_size = min(tensor_model_parallel_size_, world_size)
     pipeline_model_parallel_size = min(pipeline_model_parallel_size_, world_size)
-    assert world_size % (tensor_model_parallel_size * pipeline_model_parallel_size) == 0, '{} is not divisible by {}'.format(world_size, (tensor_model_parallel_size * pipeline_model_parallel_size))       # noqa
-    data_parallel_size = world_size // (tensor_model_parallel_size * pipeline_model_parallel_size)
+    context_parallel_size = min(context_parallel_size_, world_size)
+    # assert world_size % (tensor_model_parallel_size * pipeline_model_parallel_size) == 0, '{} is not divisible by {}'.format(world_size, (tensor_model_parallel_size * pipeline_model_parallel_size))       # noqa
+    assert world_size % (tensor_model_parallel_size * pipeline_model_parallel_size * context_parallel_size) == 0, '{} is not divisible by {}'.format(
+        world_size, (tensor_model_parallel_size * pipeline_model_parallel_size * context_parallel_size))
+    # data_parallel_size = world_size // (tensor_model_parallel_size * pipeline_model_parallel_size)
+    data_parallel_size = world_size // (tensor_model_parallel_size * pipeline_model_parallel_size * context_parallel_size)
 
     num_tensor_model_parallel_groups = world_size // tensor_model_parallel_size
     num_pipeline_model_parallel_groups = world_size // pipeline_model_parallel_size
@@ -113,9 +125,9 @@ def initialize_model_parallel(tensor_model_parallel_size_=1,
     for i in range(pipeline_model_parallel_size):
         start_rank = i * num_pipeline_model_parallel_groups
         end_rank = (i + 1) * num_pipeline_model_parallel_groups
-        for j in range(tensor_model_parallel_size):
+        for j in range(tensor_model_parallel_size * context_parallel_size):
             ranks = range(start_rank + j, end_rank,
-                          tensor_model_parallel_size)
+                          tensor_model_parallel_size * context_parallel_size)
             all_data_parallel_group_ranks.append(list(ranks))
             group = torch.distributed.new_group(ranks)
             if rank in ranks:
@@ -143,6 +155,16 @@ def initialize_model_parallel(tensor_model_parallel_size_=1,
         if rank in ranks:
             _TENSOR_MODEL_PARALLEL_GROUP = group
 
+    # for i in range(data_parallel_size * pipeline_model_parallel_size):
+    #     start_rank = i * tensor_model_parallel_size * context_parallel_size
+    #     end_rank = (i + 1) * tensor_model_parallel_size * context_parallel_size
+    #     for j in range(context_parallel_size):
+    #         ranks = range(start_rank + j, end_rank,
+    #                       context_parallel_size)
+    #         group = torch.distributed.new_group(ranks)
+    #         if rank in ranks:
+    #             _TENSOR_MODEL_PARALLEL_GROUP = group
+
     # Build the pipeline model-parallel groups and embedding groups
     # (first and last rank in each pipeline model-parallel group).
     global _PIPELINE_MODEL_PARALLEL_GROUP
@@ -169,6 +191,29 @@ def initialize_model_parallel(tensor_model_parallel_size_=1,
         if rank in embedding_ranks:
             _EMBEDDING_GROUP = group
 
+    # Build the context parallel groups
+    global _CONTEXT_PARALLEL_GROUP
+    global _CONTEXT_PARALLEL_GLOBAL_RANKS
+    assert _CONTEXT_PARALLEL_GROUP is None, \
+        'context parallel group is already initialized'
+    for i in range(data_parallel_size * pipeline_model_parallel_size):
+        start_rank = i * tensor_model_parallel_size * context_parallel_size
+        end_rank = (i + 1) * tensor_model_parallel_size * context_parallel_size
+        for j in range(tensor_model_parallel_size):
+            ranks = range(start_rank + j, end_rank,
+                          tensor_model_parallel_size)
+            group = torch.distributed.new_group(ranks)
+            if rank in ranks:
+                _CONTEXT_PARALLEL_GROUP = group
+                _CONTEXT_PARALLEL_GLOBAL_RANKS = ranks
+    # for i in range(num_context_parallel_groups):
+    #     ranks = range(i * context_parallel_size,
+    #                   (i + 1) * context_parallel_size)
+    #     group = torch.distributed.new_group(ranks)
+    #     if rank in ranks:
+    #         _CONTEXT_PARALLEL_GROUP = group
+    #         _CONTEXT_PARALLEL_GLOBAL_RANKS = ranks
+
     # Initialize global memory buffer
     # This isn't really "parallel state" but there isn't another good place to
     # put this. If we end up with a more generic initialization of megatron-core
@@ -178,7 +223,7 @@ def initialize_model_parallel(tensor_model_parallel_size_=1,
 
 def model_parallel_is_initialized():
     """Check if model and data parallel groups are initialized."""
-    if _TENSOR_MODEL_PARALLEL_GROUP is None or _PIPELINE_MODEL_PARALLEL_GROUP is None or _DATA_PARALLEL_GROUP is None:
+    if _TENSOR_MODEL_PARALLEL_GROUP is None or _PIPELINE_MODEL_PARALLEL_GROUP is None or _DATA_PARALLEL_GROUP is None or _CONTEXT_PARALLEL_GROUP is None:
         return False
     return True
 
@@ -188,6 +233,21 @@ def get_model_parallel_group():
     assert _MODEL_PARALLEL_GROUP is not None, \
         'model parallel group is not initialized'
     return _MODEL_PARALLEL_GROUP
+
+
+def get_context_parallel_group():
+    """Get the context parallel group the caller rank belongs to."""
+    assert _CONTEXT_PARALLEL_GROUP is not None, \
+        'context parallel group is not initialized'
+    return _CONTEXT_PARALLEL_GROUP
+
+
+def get_context_parallel_global_ranks():
+    """Get all global ranks of the context parallel group that the caller rank belongs to."""
+    assert (
+        _CONTEXT_PARALLEL_GLOBAL_RANKS is not None
+    ), 'context parallel group is not initialized'
+    return _CONTEXT_PARALLEL_GLOBAL_RANKS
 
 
 def get_tensor_model_parallel_group():
@@ -230,6 +290,13 @@ def set_pipeline_model_parallel_world_size(world_size):
     _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = world_size
 
 
+def get_context_parallel_world_size():
+    global _MPU_CONTEXT_PARALLEL_WORLD_SIZE
+    if _MPU_CONTEXT_PARALLEL_WORLD_SIZE is not None:
+        return _MPU_CONTEXT_PARALLEL_WORLD_SIZE
+    return torch.distributed.get_world_size(group=get_context_parallel_group())
+
+
 def get_tensor_model_parallel_world_size():
     """Return world size for the tensor model parallel group."""
     global _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
@@ -261,6 +328,14 @@ def set_pipeline_model_parallel_rank(rank):
     """Set pipeline model parallel rank."""
     global _MPU_PIPELINE_MODEL_PARALLEL_RANK
     _MPU_PIPELINE_MODEL_PARALLEL_RANK = rank
+
+
+def get_context_parallel_rank():
+    """Return my rank for the context parallel group."""
+    global _MPU_CONTEXT_PARALLEL_RANK
+    if _MPU_CONTEXT_PARALLEL_RANK is not None:
+        return _MPU_CONTEXT_PARALLEL_RANK
+    return torch.distributed.get_rank(group=get_context_parallel_group())
 
 
 def get_tensor_model_parallel_rank():
@@ -406,7 +481,7 @@ def get_global_rank():
 
 
 def initialize_distributed(rank, local_rank, world_size, tensor_model_parallel_size,
-                           pipeline_model_parallel_size, distributed_backend='nccl', launcher='torch'):
+                           pipeline_model_parallel_size, context_parallel_size, distributed_backend='nccl', launcher='torch'):
     """Initialize torch.distributed and mpu."""
 
     device_count = torch.cuda.device_count()
@@ -442,6 +517,7 @@ def initialize_distributed(rank, local_rank, world_size, tensor_model_parallel_s
         else:
             initialize_model_parallel(tensor_model_parallel_size,
                                       pipeline_model_parallel_size,
+                                      context_parallel_size,
                                       virtual_pipeline_model_parallel_size_=None)        # noqa
 
 
@@ -485,8 +561,10 @@ def get_distributed_info(cfg_runtime, launcher, port=13333):
 
     tensor_model_parallel_size = cfg_runtime.get('tensor_model_parallel_size', -1)
     pipeline_model_parallel_size = cfg_runtime.get('pipeline_model_parallel_size', -1)
+    context_parallel_size = cfg_runtime.get('context_parallel_size', -1)
     assert tensor_model_parallel_size > 0, 'You must provide a positive tensor_model_parallel_size'
     assert pipeline_model_parallel_size > 0, 'You must provide a positive pipeline_model_parallel_size'
+    assert context_parallel_size > 0, 'You must provide a positive context_parallel_size'
     # Distributed args.
     rank = int(os.getenv('RANK', '0'))
     world_size = int(os.getenv("WORLD_SIZE", '1'))
@@ -499,18 +577,24 @@ def get_distributed_info(cfg_runtime, launcher, port=13333):
     # Pipeline model parallel size.
     pipeline_model_parallel_size = min(pipeline_model_parallel_size,
                                        (world_size // tensor_model_parallel_size))
+    # Context parallel size.
+    context_parallel_size = min(context_parallel_size,
+                                (world_size // (pipeline_model_parallel_size * tensor_model_parallel_size)))
     # Checks.
-    model_parallel_size = pipeline_model_parallel_size * tensor_model_parallel_size
+    # model_parallel_size = pipeline_model_parallel_size * tensor_model_parallel_size
+    model_parallel_size = pipeline_model_parallel_size * tensor_model_parallel_size * context_parallel_size
     assert world_size % model_parallel_size == 0, 'world size {} is not' \
         ' divisible by tensor parallel size ({}) times pipeline parallel ' \
-        'size ({})'.format(world_size, tensor_model_parallel_size,
-                           pipeline_model_parallel_size)
+        'size ({}) times context parallel size ({})'.format(world_size, tensor_model_parallel_size,
+                                                            pipeline_model_parallel_size, context_parallel_size)
     data_parallel_size = world_size // model_parallel_size
     if rank == 0:
         print('using world size: {}, data-parallel-size: {}, '
               'tensor-model-parallel size: {}, '
-              'pipeline-model-parallel size: {} '.format(
+              'pipeline-model-parallel size: {}, '
+              'context-parallel size: {}'.format(
                   world_size, data_parallel_size,
                   tensor_model_parallel_size,
-                  pipeline_model_parallel_size), flush=True)
-    return rank, local_rank, world_size, tensor_model_parallel_size, pipeline_model_parallel_size
+                  pipeline_model_parallel_size,
+                  context_parallel_size), flush=True)
+    return rank, local_rank, world_size, tensor_model_parallel_size, pipeline_model_parallel_size, context_parallel_size

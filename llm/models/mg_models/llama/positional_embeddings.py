@@ -5,6 +5,8 @@ from typing import Optional
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
+from llm.utils.env import dist_env
+
 
 class RotaryEmbedding(torch.nn.Module):
 
@@ -21,6 +23,9 @@ class RotaryEmbedding(torch.nn.Module):
     def forward(self, x, seq_dim=1, seq_len=None):
         if seq_len is None:
             seq_len = x.shape[seq_dim]
+        cp_size = dist_env.get_context_parallel_world_size()
+        if cp_size > 1:
+            seq_len = seq_len * cp_size
         if self.max_seq_len_cached is None or (seq_len > self.max_seq_len_cached):
             self.max_seq_len_cached = seq_len
             # follow transformers LlamaLinearScalingRotaryEmbedding implement
@@ -37,6 +42,16 @@ class RotaryEmbedding(torch.nn.Module):
             if self.precision == torch.bfloat16:
                 self.cos_cached = self.cos_cached.bfloat16()
                 self.sin_cached = self.sin_cached.bfloat16()
+            if cp_size > 1:
+                cp_rank = dist_env.get_context_parallel_rank()
+                self.cos_cached = self.cos_cached.view(2 * cp_size, self.cos_cached.shape[0] // (2 * cp_size), *self.cos_cached.shape[1:])
+                self.sin_cached = self.sin_cached.view(2 * cp_size, self.sin_cached.shape[0] // (2 * cp_size), *self.sin_cached.shape[1:])
+                index = torch.tensor([cp_rank, (2 * cp_size - cp_rank - 1)], device="cpu", pin_memory=True).cuda(non_blocking=True)
+                self.cos_cached = self.cos_cached.index_select(0, index)
+                self.sin_cached = self.sin_cached.index_select(0, index)
+                self.cos_cached = self.cos_cached.view(-1, *self.cos_cached.shape[2:])
+                self.sin_cached = self.sin_cached.view(-1, *self.sin_cached.shape[2:])
+                return self.cos_cached, self.sin_cached
         return self.cos_cached[:seq_len, ...], self.sin_cached[:seq_len, ...]
 
 
@@ -44,6 +59,7 @@ class InternLM2DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
     """InternLM2RotaryEmbedding extended with Dynamic NTK scaling.
     Credits to the Reddit users /u/bloc97 and /u/emozilla.
     """
+
     def __init__(self,
                  dim,
                  base=10000,

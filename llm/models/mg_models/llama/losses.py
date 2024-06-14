@@ -33,6 +33,8 @@ class CrossEntropy(object):
         loss_mask = loss_mask.view(-1)
         loss_mask = loss_mask * (~ignore_mask.view(-1))
         expected_number_of_tokens = loss_mask.sum()
+        if dist_env.get_context_parallel_world_size() > 1:
+            dist.all_reduce(expected_number_of_tokens, group=dist_env.get_context_parallel_group(), op=dist.ReduceOp.SUM)
         if self.dp_reduce and not self.dynamic_bs_loss:
             dist.all_reduce(expected_number_of_tokens, group=dist_env.get_data_parallel_group(), op=dist.ReduceOp.AVG)
         return max(expected_number_of_tokens, 1), loss_mask
@@ -83,6 +85,9 @@ class CrossEntropy(object):
             else:
                 losses = vocab_parallel_cross_entropy(output.contiguous().float(), labels, self.cut_size)
                 loss = torch.sum(losses.view(-1) * loss_mask) / expected_number_of_tokens
+        if dist_env.get_context_parallel_world_size() > 1:
+            dist.all_reduce(loss, group=dist_env.get_context_parallel_group())
+
         return loss
 
 

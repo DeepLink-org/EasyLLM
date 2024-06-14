@@ -1,5 +1,6 @@
 from deepspeed.pipe import PipelineModule, LayerSpec
-from deepspeed.runtime.pipe.topology import PipeModelDataParallelTopology
+# from deepspeed.runtime.pipe.topology import PipeModelDataParallelTopology
+from deepspeed.runtime.pipe.topology import PipeContextModelDataParallelTopology
 from deepspeed.runtime import utils as ds_utils
 import torch.nn as nn
 
@@ -65,9 +66,13 @@ class LlamaModelPipe(PipelineModule, MegatronModule):
         else:
             interval = 0
 
-        topo = PipeModelDataParallelTopology(num_pp=dist_env.get_pipeline_model_parallel_world_size(),
-                                             num_mp=dist_env.get_tensor_model_parallel_world_size(),
-                                             num_dp=dist_env.get_data_parallel_world_size())
+        # topo = PipeModelDataParallelTopology(num_pp=dist_env.get_pipeline_model_parallel_world_size(),
+        #                                      num_mp=dist_env.get_tensor_model_parallel_world_size(),
+        #                                      num_dp=dist_env.get_data_parallel_world_size())
+        topo = PipeContextModelDataParallelTopology(num_pp=dist_env.get_pipeline_model_parallel_world_size(),
+                                                    num_mp=dist_env.get_tensor_model_parallel_world_size(),
+                                                    num_dp=dist_env.get_data_parallel_world_size(),
+                                                    num_cp=dist_env.get_context_parallel_world_size())
 
         # here one can extend the regex to include more layers to be counted towards partitioning,
         # e.g. 'type:transformer|embedding' will add up all the transformer blocks and also the first

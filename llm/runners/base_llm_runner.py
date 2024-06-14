@@ -88,12 +88,17 @@ class BaseRunner(object):
     def build_env(self, rank=None, local_rank=None):
         cfg_runtime = self.config['runtime']
         # get env info
+        # rank, local_rank, world_size, tensor_model_parallel_size, \
+        #     pipeline_model_parallel_size = get_distributed_info(cfg_runtime, self.args.launcher, self.args.port)
         rank, local_rank, world_size, tensor_model_parallel_size, \
-            pipeline_model_parallel_size = get_distributed_info(cfg_runtime, self.args.launcher, self.args.port)
+            pipeline_model_parallel_size, context_parallel_size = get_distributed_info(cfg_runtime, self.args.launcher, self.args.port)
         # initialize env
         # Pytorch distributed.
+        # initialize_distributed(rank, local_rank, world_size, tensor_model_parallel_size,
+        #                        pipeline_model_parallel_size, cfg_runtime.get('distributed_backend', 'nccl'),
+        #                        self.args.launcher)
         initialize_distributed(rank, local_rank, world_size, tensor_model_parallel_size,
-                               pipeline_model_parallel_size, cfg_runtime.get('distributed_backend', 'nccl'),
+                               pipeline_model_parallel_size, context_parallel_size, cfg_runtime.get('distributed_backend', 'nccl'),
                                self.args.launcher)
         # Initialize deepspeed random and activation checkpointing.
         if self.deepspeed:
@@ -142,7 +147,7 @@ class BaseRunner(object):
                 infer_type = cfg_data[data_type].get('infer_type', 'interactive')
                 if infer_type == 'interactive':
                     continue        # skip build data_iterators for inference mode
-            data_iterator, dataset_size = build_data_iterator(self.tokenizer, cfg_data, self.consumed_train_samples, data_type) # noqa
+            data_iterator, dataset_size = build_data_iterator(self.tokenizer, cfg_data, self.consumed_train_samples, data_type)  # noqa
             self.data_iterators[data_type] = data_iterator
         if self.training:
             epoch = self.config['trainer'].get('epoch', -1)
