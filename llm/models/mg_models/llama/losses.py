@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist
 
 from llm.models.mg_models.base_modules.functions.cross_entropy import vocab_parallel_cross_entropy
 from llm.utils.env import dist_env
@@ -56,7 +57,7 @@ class CrossEntropy(object):
     def __call__(self, output, labels):
         labels, loss_mask = labels[0], labels[1]
         expected_number_of_tokens, loss_mask = self.get_expected_number_of_tokens(labels, loss_mask)
-        if ((labels == -100).all():
+        if (labels == -100).all():
             bs, d = labels.shape
             ignore_mask = (labels != -100).view(-1)
             loss = output.view(bs * d, -1)[ignore_mask].sum()
