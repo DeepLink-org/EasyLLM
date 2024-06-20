@@ -291,7 +291,26 @@ def load_save_func(layers_tp,
             val = sum([tp_dt[s][name] for s in range(tp_size)])
             val /= tp_size
         elif name in WEIGHTS_WITH_COLUMN_PARALLELISM_CONTAIN:
-            val = torch.cat([tp_dt[s][name] for s in range(tp_size)], dim=0)
+            if save_intern:
+                if "self_attn.q_proj" in key:
+                    gs = (n_heads // num_key_value_heads)
+                    q_proj_val = torch.cat([tp_dt[s][name] for s in range(tp_size)], dim=0)
+                    hid_size = q_proj_val.shape[-1]
+                    head_dim = hid_size // n_heads
+                    q_proj_val = q_proj_val.reshape(-1, gs, head_dim, hid_size)
+                    k_proj_val = torch.cat([tp_dt[s][name.replace("q_proj", "k_proj")] for s in range(tp_size)], dim=0).reshape(-1, 1, head_dim, hid_size)
+                    v_proj_val = torch.cat([tp_dt[s][name.replace("q_proj", "v_proj")] for s in range(tp_size)], dim=0).reshape(-1, 1, head_dim, hid_size)
+                    qkv_val = torch.cat([q_proj_val, k_proj_val, v_proj_val], dim=1)
+                    state_dict[key.replace("self_attn.q_proj.weight", "attention.wqkv.weight")] = qkv_val.reshape(-1, hid_size)
+                    continue
+                elif "self_attn.k_proj" in key:
+                    continue
+                elif "self_attn.v_proj" in key:
+                    continue
+                else:
+                    val = torch.cat([tp_dt[s][name] for s in range(tp_size)], dim=0)
+            else:
+                val = torch.cat([tp_dt[s][name] for s in range(tp_size)], dim=0)
         elif name in WEIGHTS_WITH_PACK_COLUMN_PARALLELISM_CONTAIN:
             gs = (n_heads // num_key_value_heads)
             g_dims = tp_dt[0][name].shape[0] // (gs + 2)
