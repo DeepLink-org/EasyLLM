@@ -61,16 +61,12 @@ class MiniRLHFJsonBatchFunction(object):
         labels = data_b['labels'].long()
         tokens = data_b['input_ids'].long()
 
-        # Get the masks and position ids.
-        attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
-            tokens,
-            self.pad_token_id,
-            self.reset_position_ids,
-            self.reset_attention_mask,
-            self.eod_mask_loss,
-            prefix_indices=self.prefix_indices,
-            loss_on_targets_only=self.loss_on_targets_only
-        )
+        attention_mask = tokens.ne(self.pad_token_id)
+        loss_mask = attention_mask.clone()
+        _, seq_length = tokens.size()
+        position_ids = torch.arange(seq_length, dtype=torch.long,
+                                    device=tokens.device)
+        position_ids = position_ids.unsqueeze(0).expand_as(tokens)
 
         return (tokens, position_ids, attention_mask), (labels, loss_mask, scores)
 
@@ -96,16 +92,13 @@ class TokenBatchFunction(object):
         tokens = data.view(self.micro_batch_size, -1).contiguous().cuda()
 
         labels = torch.cat([tokens[:, 1:], tokens.new_ones(tokens.shape[0], 1) * self.tokenizer.eos_token_id], dim=-1)
-        # Get the attention mask and position ids.
-        attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
-            tokens,
-            self.tokenizer.eos_token_id,
-            self.reset_position_ids,
-            self.reset_attention_mask,
-            self.eod_mask_loss,
-            prefix_indices=self.prefix_indices,
-            loss_on_targets_only=self.loss_on_targets_only
-        )
+
+        attention_mask = tokens.ne(self.pad_token_id)
+        loss_mask = attention_mask.clone()
+        _, seq_length = tokens.size()
+        position_ids = torch.arange(seq_length, dtype=torch.long,
+                                    device=tokens.device)
+        position_ids = position_ids.unsqueeze(0).expand_as(tokens)
 
         return (tokens, position_ids, attention_mask), (labels, loss_mask)
 
