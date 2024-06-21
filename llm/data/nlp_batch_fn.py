@@ -202,7 +202,7 @@ class FlashBatchFunction(object):
         else:
             cu_seqlens = data_b['cu_seqlens']
             position_ids = data_b['position_ids']
-            return (tokens, position_ids, attention_mask, cu_seqlens), (labels, loss_mask)
+            return (tokens, position_ids, attention_mask, cu_seqlens), (labels, loss_mask, cu_seqlens)
 
 
 @BATCH_FN_REGISTRY.register('mini_rlhf_json_batch_pipe')
