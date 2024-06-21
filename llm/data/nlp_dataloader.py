@@ -126,15 +126,14 @@ class BatchAlignCollector(BatchCollector):
         self.offset_label = offset_label
         self.test_speed = test_speed
         self.pretrain = pretrain
-        if pretrain:
-            self.data_keys = ["input_ids", "labels", "cu_seqlens", "position_ids"]
-        else:
-            self.data_keys = ["input_ids", "labels"]
+        self.data_keys = ["input_ids", "labels"]
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         if 'cu_seqlens' in instances[0]:
             self.pretrain = True
             self.data_keys = ["input_ids", "labels", "cu_seqlens", "position_ids"]
+        else:
+            self.pretrain = False
         item = tuple([instance[key] for instance in instances] for key in self.data_keys)  # noqa
         input_ids, labels = item[:2]
         if self.pretrain:
@@ -142,11 +141,12 @@ class BatchAlignCollector(BatchCollector):
             input_ids, labels, cu_seqlens, position_ids = self._pad_func(input_ids, labels, cu_seqlens, position_ids)
         else:
             input_ids, labels = self._pad_func(input_ids, labels)
+            cu_seqlens = torch.FloatTensor([-1]).long()
+            position_ids = torch.FloatTensor([-1]).long()
         data = dict(input_ids=input_ids,
                     labels=labels,
                     attention_mask=input_ids.ne(self.pad_token_id))
-        if self.pretrain:
-            data.update({"cu_seqlens": cu_seqlens, "position_ids": position_ids})
+        data.update({"cu_seqlens": cu_seqlens, "position_ids": position_ids})
         return data
 
     def _pad_with_alignment(self, input, padding_value=0, is_label=False):
