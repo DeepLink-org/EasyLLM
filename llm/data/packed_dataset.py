@@ -8,6 +8,7 @@ from llm.utils.general.registry_factory import DATASET_REGISTRY
 from multiprocessing.pool import ThreadPool as Pool
 from llm.data.nlp_dataset import build_dataset
 from llm.utils.general.log_helper import default_logger as logger
+from llm.utils.env import dist_env
 
 
 IGNORE_INDEX = -100
@@ -47,16 +48,17 @@ class PackedDataset(Dataset):
         self.seed = DEFAULT_SEED
         self.pack_group = self.process_random_groups(self.tokens_lengths, packed_length, packed_length_thresh, iter_time) # noqa
         self.num_tokens = sum(self.lengths)
-        self.display_groups_info(display_bin_size)
+        if dist_env.get_data_parallel_rank() == 0 and dist_env.get_pipeline_model_parallel_rank() == 0:
+            self.display_groups_info(display_bin_size)
 
     def display_groups_info(self, display_bin_size):
         info = {}
         info['length_info'] = {}
         ave_length = 0
-        min_length = 100000000
+        min_length = 100000000.
         max_length = 0
         for g in self.pack_group:
-            llm_num = self.get_token_sum(g)
+            llm_num = float(self.get_token_sum(g))
             llm_num_bin = (llm_num // display_bin_size) * display_bin_size
             if llm_num_bin not in info['length_info']:
                 info['length_info'][llm_num_bin] = 0
@@ -66,8 +68,9 @@ class PackedDataset(Dataset):
             ave_length += llm_num
         info['min_length'] = min_length
         info['max_length'] = max_length
-        info['ave_length'] = ave_length / (len(self.pack_group))
+        info['ave_length'] = float(ave_length / (len(self.pack_group)))
         info['group_num'] = len(self.pack_group)
+        info['sample_num'] = len(self.lengths)
         print(json.dumps(info, indent=4, sort_keys=True))
 
     def random_group(self, token_lengths, seed=None, llm_packed_length=4096):
@@ -118,6 +121,8 @@ class PackedDataset(Dataset):
                 groups = self.random_group(need_process_groups, self.seed + i, llm_max)
             else:
                 break
+            if dist_env.get_data_parallel_rank() == 0 and dist_env.get_pipeline_model_parallel_rank() == 0:
+                print(i + 1, len(output), len(need_process_groups))
         if len(need_process_groups) > 0:
             output.extend(self.random_group(need_process_groups, self.seed + i, llm_max))
         return output
@@ -142,7 +147,7 @@ class PackedDataset(Dataset):
             from llm.utils.env import dist_env
             if dist_env.get_data_parallel_rank() == 0 and dist_env.get_tensor_model_parallel_rank() == 0 and dist_env.get_pipeline_model_parallel_rank() == 0: # noqa
                 np.save(self.length_path, self.lengths)
-        self.tokens_lengths = [(idx, item) for idx, item in enumerate(self.lengths)]
+        self.tokens_lengths = self.lengths
 
     def __getitem__(self, item: int):
         group = self.pack_group[item]
@@ -154,7 +159,11 @@ class PackedDataset(Dataset):
         for g in group:
             index, length = g
             meta = self.dataset.__getitem__(index)
-            assert len(meta["input_ids"]) == length
+            new_length = len(meta["input_ids"])
+            if new_length != length:
+                print(index, f"current length {new_length} != cache {length}")
+                continue
+
             input_ids.append(meta['input_ids'])
             labels.append(meta['labels'])
             cu_seqlens.append(len(meta['input_ids']))

@@ -8,8 +8,8 @@ from multiprocessing import Manager
 
 
 def process(idx):
-    meta = dataset.__getitem__(idx)
-    dic[idx] = len(meta['input_ids'])
+    meta, out_idx = dataset.get_meta(idx)
+    dic[idx] = (out_idx, len(meta['input_ids']))
 
 
 if __name__ == "__main__":
@@ -39,6 +39,6 @@ if __name__ == "__main__":
     indexes = list(range(dataset_size))
     dic = Manager().dict()
     with Pool(args.worker) as p:
-        p.map(process, indexes)
-    lengths = [dic[idx] for idx in indexes]
+        p.map(process, indexes[:])
+    lengths = [dic[idx] for idx in indexes[:]]
     np.save(length_path, lengths)

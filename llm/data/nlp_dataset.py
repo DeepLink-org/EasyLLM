@@ -188,19 +188,21 @@ class BaseNLPJsonDataset(Dataset):
                             logger.info('{} items of data have been loaded'.format(i + 1))
         return metas
 
-    def get_meta(self, idx):
+    def _get_meta(self, idx):
         meta = self.metas[idx]
         if self.transformer is not None:
             meta = self.transformer(meta)
         return meta
 
-    def __getitem__(self, idx):
-        meta = self.get_meta(idx)
+    def get_meta(self, idx):
+        meta = self._get_meta(idx)
         while meta is None:
-            # self.set_seed(idx)
-            # new_idx = random.randint(0, len(self.metas) - 1)
             idx = (idx + 100) % len(self.metas)
-            meta = self.get_meta(idx)
+            meta = self._get_meta(idx)
+        return meta, idx
+
+    def __getitem__(self, idx):
+        meta, _ = self.get_meta(idx)
         return meta
 
     def __len__(self):

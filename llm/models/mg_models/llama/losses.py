@@ -38,7 +38,6 @@ class CrossEntropy(object):
         return max(expected_number_of_tokens, 1), loss_mask
 
     def __call__(self, inputs, labels):
-
         if len(labels) == 3:
             labels, loss_mask, cu_seqlens = labels[0], labels[1], labels[2]
         else:
@@ -48,7 +47,6 @@ class CrossEntropy(object):
             output, loss_mask, labels, cu_seqlens = inputs[0], inputs[1], inputs[2], inputs[3]
         else:
             output = inputs
-
         if self.dynamic_bs_loss and cu_seqlens is not None:
             if ((labels == -100).sum() == labels.shape[1]):
                 bs, d = labels.shape
@@ -57,28 +55,25 @@ class CrossEntropy(object):
             else:
                 losses = vocab_parallel_cross_entropy(output.contiguous().float(), labels, self.cut_size)
                 bs = labels.shape[0]
-                loss = []
-                for b in range(bs):
-                    single_cu_seqlen = cu_seqlens[b]
-                    single_losses = losses[b]
-                    single_labels = labels[b]
-                    single_loss_mask = loss_mask[b]
-                    b_loss = 0.
-                    sum_sqrt_token = 0.
-                    for idx in range(1, len(single_cu_seqlen)):
-                        start, end = single_cu_seqlen[idx - 1], single_cu_seqlen[idx]
-                        single_losses_ = single_losses[start:end]
-                        single_labels_ = single_labels[start:end].unsqueeze(0)
-                        single_loss_mask_ = single_loss_mask[start:end].unsqueeze(0)
-                        expected_number_of_tokens, single_loss_mask_ = self.get_expected_number_of_tokens(single_labels_, single_loss_mask_)
-                        sqrt_token = expected_number_of_tokens.float().sqrt().to(single_losses_)
-                        b_loss += torch.sum(single_losses_.view(-1) * single_loss_mask_) / expected_number_of_tokens * sqrt_token
-                        sum_sqrt_token += sqrt_token
-                    dist.all_reduce(sum_sqrt_token, group=dist_env.get_data_parallel_group(), op=torch.distributed.ReduceOp.AVG)
-                    if self.dynamic_mean:
-                        b_loss /= sum_sqrt_token
-                    loss.append(b_loss)
-                loss = sum(loss) / len(loss)
+                assert bs == 1, "only support micro batch size == 1"
+                single_cu_seqlen = cu_seqlens
+                single_losses = losses[0]
+                single_labels = labels[0]
+                single_loss_mask = loss_mask[0]
+                loss = 0.
+                sum_sqrt_token = 0.
+                for idx in range(1, len(single_cu_seqlen)):
+                    start, end = single_cu_seqlen[idx - 1], single_cu_seqlen[idx]
+                    single_losses_ = single_losses[start:end]
+                    single_labels_ = single_labels[start:end].unsqueeze(0)
+                    single_loss_mask_ = single_loss_mask[start:end].unsqueeze(0)
+                    expected_number_of_tokens, single_loss_mask_ = self.get_expected_number_of_tokens(single_labels_, single_loss_mask_)
+                    sqrt_token = expected_number_of_tokens.float().sqrt().to(single_losses_)
+                    loss += torch.sum(single_losses_.view(-1) * single_loss_mask_) / expected_number_of_tokens * sqrt_token
+                    sum_sqrt_token += sqrt_token
+                dist.all_reduce(sum_sqrt_token, group=dist_env.get_data_parallel_group(), op=torch.distributed.ReduceOp.AVG)
+                if self.dynamic_mean:
+                    loss /= sum_sqrt_token
         else:
             expected_number_of_tokens, loss_mask = self.get_expected_number_of_tokens(labels, loss_mask)
             if ((labels == -100).sum() == labels.shape[1]):
