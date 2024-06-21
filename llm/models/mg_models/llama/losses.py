@@ -48,6 +48,7 @@ class CrossEntropy(object):
         else:
             output = inputs
         if self.dynamic_bs_loss and cu_seqlens is not None:
+            sum_sqrt_token = 0.
             if ((labels == -100).sum() == labels.shape[1]):
                 bs, d = labels.shape
                 ignore_mask = (labels != -100).view(-1)
@@ -61,7 +62,6 @@ class CrossEntropy(object):
                 single_labels = labels[0]
                 single_loss_mask = loss_mask[0]
                 loss = 0.
-                sum_sqrt_token = 0.
                 for idx in range(1, len(single_cu_seqlen)):
                     start, end = single_cu_seqlen[idx - 1], single_cu_seqlen[idx]
                     single_losses_ = single_losses[start:end]
@@ -73,7 +73,7 @@ class CrossEntropy(object):
                     sum_sqrt_token += sqrt_token
                 dist.all_reduce(sum_sqrt_token, group=dist_env.get_data_parallel_group(), op=torch.distributed.ReduceOp.AVG)
                 if self.dynamic_mean:
-                    loss /= sum_sqrt_token
+                    loss /= max(sum_sqrt_token, 1)
         else:
             expected_number_of_tokens, loss_mask = self.get_expected_number_of_tokens(labels, loss_mask)
             if ((labels == -100).sum() == labels.shape[1]):
