@@ -18,7 +18,7 @@ def build_tokenizer(_cfg_tokenizer):
         special_tokens = cfg_tokenizer.get('special_tokens')
         tokenizer.add_special_tokens(special_tokens)
     # Add vocab size.
-    padded_vocab_size = _vocab_size_with_padding(tokenizer.vocab_size,
+    padded_vocab_size = _vocab_size_with_padding(len(tokenizer),
                                                  pad_vocab_size_to,
                                                  make_vocab_size_divisible_by)
     setattr(tokenizer, 'padded_vocab_size', padded_vocab_size)

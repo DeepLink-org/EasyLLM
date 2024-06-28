@@ -59,7 +59,7 @@ def set_hook_model_args():
     model_args['glu_activation'] = False
     return model_args
 
-def set_model_args():
+def set_model_args(model_cfg):
     args = get_args()
     model_args = {}
     model_args['seq_len'] = args.seq_length
@@ -67,6 +67,7 @@ def set_model_args():
     model_args['num_layers'] = args.num_layers
     model_args['vocab_size'] = args.padded_vocab_size
     model_args['num_attention_heads'] = args.num_attention_heads
+    model_args['num_kv_heads'] = model_cfg.get('num_query_groups', args.num_attention_heads)
     return model_args
 
 class BaseRunner(object):
@@ -91,6 +92,7 @@ class BaseRunner(object):
             self.deepspeed_init()
         self.load_checkpoint()
         self.build_data_engine()
+
 
     def set_param_components(self):
         self.start_iteration = 0
@@ -160,7 +162,7 @@ class BaseRunner(object):
 
     def build_hooks(self):
         self.set_hook_model_args = set_hook_model_args
-        self.unwraped_model().model_kwargs = set_model_args()
+        self.unwraped_model().model_kwargs = set_model_args(self.config['models'])
         cfg_hooks = self.config.get('hooks', [])
         self._hooks = build_hooks(self, cfg_hooks, is_train=self.training, add_log_if_not_exists=True)
         logger.info('build hooks done')

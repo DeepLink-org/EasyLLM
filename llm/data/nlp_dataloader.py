@@ -81,7 +81,7 @@ class BatchCollector(object):
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         if self.tokenizer.pad_token_id is None:
-            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+            self.tokenizer.pad_token_id = self.pad_token_id
         instances = self.collator(instances)
         input_ids, labels, attention_mask = instances["input_ids"], instances["labels"], instances["attention_mask"]
         return dict(
@@ -179,7 +179,7 @@ class BatchAlignCollector(BatchCollector):
             input_ids, labels = self._pad_func(input_ids, labels)
         data = dict(input_ids=input_ids,
                     labels=labels,
-                    attention_mask=input_ids.ne(self.pad_token_id))
+                    attention_mask=input_ids.ne(self.pad_token_id).long())
         if self.pretrain:
             data.update({"cu_seqlens": cu_seqlens, "position_ids": position_ids})
         return data

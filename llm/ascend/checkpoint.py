@@ -133,23 +133,30 @@ def load_ckpt_from_pretrain(cfg_loader, model, optimizer, tp_rank, tp_size, pp_r
     get_weight_from_name = partial(get_weight_from, weight_map)
 
     pp_n_layer = n_layer // pp_size
-    emb_w = get_weight_from_name("model.embed_tokens.weight")
-    emb_w = pad_embed(emb_w, make_vocab_size_divisible_by, tp_size, added_token_num)
+    if pretrain_type == 'llama':
+        emb_w = get_weight_from_name("model.embed_tokens.weight")
+    if pretrain_type == 'internlm2':
+        emb_w = get_weight_from_name("model.tok_embeddings.weight")
+    # emb_w = pad_embed(emb_w, make_vocab_size_divisible_by, tp_size, added_token_num)
     state_dict = model.state_dict()
-
     if pp_rank == 0:
         state_dict["language_model.embedding.word_embeddings.weight"].copy_(row_split(emb_w, tp_size, tp_rank))
+
     if pp_rank == pp_size - 1:
-        state_dict["language_model.encoder.final_layernorm.weight"].copy_(get_weight_from_name("model.norm.weight").clone())
-        state_dict["language_model.output_layer.weight"].copy_(row_split(
-            pad_embed(get_weight_from_name("lm_head.weight"), make_vocab_size_divisible_by,
-                        tp_size, added_token_num), tp_size, tp_rank))
+        if pretrain_type == 'llama':
+            state_dict["language_model.encoder.final_layernorm.weight"].copy_(get_weight_from_name("model.norm.weight").clone())
+            state_dict["language_model.output_layer.weight"].copy_(row_split(get_weight_from_name("lm_head.weight"), tp_size, tp_rank))
+        if pretrain_type == 'internlm2':
+            state_dict["language_model.encoder.final_layernorm.weight"].copy_(get_weight_from_name("model.norm.weight").clone())
+            state_dict["language_model.output_layer.weight"].copy_(row_split(get_weight_from_name("output.weight"), tp_size, tp_rank))    
+        # state_dict["language_model.output_layer.weight"].copy_(row_split(
+        #     pad_embed(get_weight_from_name("lm_head.weight"), make_vocab_size_divisible_by,
+        #                 tp_size, added_token_num), tp_size, tp_rank))
     def layer_update(pp_i):
         ori_i = pp_n_layer * pp_rank + pp_i
         qw = row_split(get_weight_from_name(f"model.layers.{ori_i}.self_attn.q_proj.weight"), tp_size, tp_rank)
         kw = row_split(get_weight_from_name(f"model.layers.{ori_i}.self_attn.k_proj.weight"), tp_size, tp_rank)
         vw = row_split(get_weight_from_name(f"model.layers.{ori_i}.self_attn.v_proj.weight"), tp_size, tp_rank)
-
         permute_w = permute_qkv_weight(torch.cat([qw, kw, vw], dim=0), (n_heads, hidden_size, tp_size, num_kv_heads))
         state_dict[f"language_model.encoder.layers.{pp_i}.self_attention.query_key_value.weight"].copy_(permute_w)
         state_dict[f"language_model.encoder.layers.{pp_i}.self_attention.dense.weight"].copy_(column_split(
@@ -168,8 +175,38 @@ def load_ckpt_from_pretrain(cfg_loader, model, optimizer, tp_rank, tp_size, pp_r
         state_dict[f"language_model.encoder.layers.{pp_i}.post_attention_layernorm.weight"].copy_(get_weight_from_name(
             f"model.layers.{ori_i}.post_attention_layernorm.weight").clone())
 
+    def internlm2_layer_update(pp_i):
+        ori_i = pp_n_layer * pp_rank + pp_i
+        qkv = get_weight_from_name(f"model.layers.{ori_i}.attention.wqkv.weight")
+        gs = n_heads // num_kv_heads
+        head_dim = hidden_size // n_heads
+        qkv = qkv.reshape(-1, gs + 2, head_dim, hidden_size)
+        qw = row_split(qkv[:, :gs, ...], tp_size, tp_rank).reshape(-1, hidden_size)
+        kw = row_split(qkv[:, -2, ...], tp_size, tp_rank).reshape(-1, hidden_size)
+        vw = row_split(qkv[:, -1, ...], tp_size, tp_rank).reshape(-1, hidden_size)
+        qkv_w = torch.cat([qw, kw, vw], dim=0)
+        state_dict[f"language_model.encoder.layers.{pp_i}.self_attention.query_key_value.weight"].copy_(qkv_w)
+        state_dict[f"language_model.encoder.layers.{pp_i}.self_attention.dense.weight"].copy_(column_split(
+            get_weight_from_name(f"model.layers.{ori_i}.attention.wo.weight"), tp_size, tp_rank))
+
+        gate_proj = row_split(
+            get_weight_from_name(f"model.layers.{ori_i}.feed_forward.w1.weight"), tp_size, tp_rank)
+        up_proj = row_split(
+            get_weight_from_name(f"model.layers.{ori_i}.feed_forward.w3.weight"), tp_size, tp_rank)
+        state_dict[f"language_model.encoder.layers.{pp_i}.mlp.proj.weight"].copy_(torch.cat(
+            [gate_proj, up_proj], 0).contiguous().clone())
+        state_dict[f"language_model.encoder.layers.{pp_i}.mlp.dense_4h_to_h.weight"].copy_(column_split(
+            get_weight_from_name(f"model.layers.{ori_i}.feed_forward.w2.weight"), tp_size, tp_rank))
+        state_dict[f"language_model.encoder.layers.{pp_i}.input_layernorm.weight"].copy_(get_weight_from_name(
+            f"model.layers.{ori_i}.attention_norm.weight").clone())
+        state_dict[f"language_model.encoder.layers.{pp_i}.post_attention_layernorm.weight"].copy_(get_weight_from_name(
+            f"model.layers.{ori_i}.ffn_norm.weight").clone())
+
     for pp_i in range(pp_n_layer):
-        layer_update(pp_i)
+        if pretrain_type == 'llama':
+            layer_update(pp_i)
+        if pretrain_type == 'internlm2':
+            internlm2_layer_update(pp_i)
 
     if cfg_loader["deepspeed"]:
         torch.npu.empty_cache()
