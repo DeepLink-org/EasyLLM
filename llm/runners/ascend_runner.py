@@ -8,7 +8,7 @@ from tqdm import tqdm
 from enum import Enum
 import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from llm import ascend 
+from llm import ascend
 from ascend.model import DistributedDataParallel as LocalDDP
 from ascend.model import Float16Module
 from llm.utils.general.parser_helper import parse_args
@@ -122,6 +122,11 @@ class BaseRunner(object):
         rank, local_rank, world_size, tensor_model_parallel_size, \
             pipeline_model_parallel_size = get_distributed_info(cfg_runtime, self.args.launcher, self.args.port)
         # initialize env
+        print("rank:", rank)
+        print("local_rank:", local_rank)
+        print("world_size:", world_size)
+        print("tensor_model_parallel_size:", tensor_model_parallel_size)
+        print("pipeline_model_parallel_size:", pipeline_model_parallel_size)
         initialize_distributed(rank, local_rank, world_size, tensor_model_parallel_size,
                                pipeline_model_parallel_size, None if self.deepspeed else 'nccl',
                                self.args.launcher, deepspeed=self.deepspeed)
@@ -256,7 +261,7 @@ class BaseRunner(object):
         self.model = model
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
-    
+
     def unwraped_model(self,):
         unwrap_model_all = unwrap_model(self.model, (torchDDP, LocalDDP, Float16Module))
         return unwrap_model_all
@@ -333,7 +338,7 @@ class BaseRunner(object):
             if hasattr(self.lr_scheduler, 'consumed_train_tokens'):
                 self.lr_scheduler.consumed_train_tokens = self.consumed_train_tokens
             self._hooks('after_train_iter', iteration, output)
-            
+
             self.save_checkpoint(iteration)
         self._hooks('after_train')
 
