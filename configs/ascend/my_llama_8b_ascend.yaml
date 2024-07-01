@@ -1,0 +1,166 @@
+runtime:
+  seed: &seed 42
+  tensor_model_parallel_size: 8
+  pipeline_model_parallel_size: 2
+  deepspeed: False
+  lora_mode: False
+  bf16: &bf16 True
+  fp16: &fp16 False
+  sequence_parallel: True
+
+deepspeed:
+  config:
+    gradient_clipping: 1.0
+    zero_optimization:
+      stage: 0
+    bf16:
+      enabled: *bf16
+    fp16:
+      enabled: *fp16
+    steps_per_print: 2000
+    wall_clock_breakdown: False
+
+models:
+  num_layers: 32
+  hidden_size: 8192
+  position_embedding_type: rope
+  normalization: RMSNorm
+  ffn_hidden_size: 28672
+  num_attention_heads: 64
+  group_query_attention: True
+  num_query_groups: 8
+  attention_dropout: 0.0
+  hidden_dropout: 0.0
+  init_method_std: 0.01
+  use_fused_rotary_pos_emb: True
+  no_masked_softmax_fusion: True
+  mlp_layer_fusion: True
+  use_flash_attn: True
+  use_fused_rmsnorm: True
+  micro_batch_size: &train_micro_batch_size 1
+  global_batch_size: &train_global_batch_size 16
+  max_position_embeddings: 4096
+  seq_length: &train_seq_length 4096
+  keep_last_token: True
+
+tokenizer:
+  type: LlamaTokenizerFast
+  kwargs:
+    tokenizer_name_or_path:  /ailab_internlm_data/share_data/llm_data/llama3/hf/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/2b724926966c141d5a60b14e75a5ef5c0ab7a6f0
+  make_vocab_size_divisible_by: 128
+  pad_vocab_size_to: 128256
+
+tokenization: &tokenization
+  type: sense_tokenization
+  kwargs:
+    with_tokenizer: True
+    max_seq_length: *train_seq_length
+    parser_type: preprocess
+
+infer_tokenization:
+  type: sense_tokenization
+  kwargs:
+    max_seq_length: *train_seq_length
+    parser_type: simple_chat
+
+data:
+  data_types: [train, infer]
+  train:
+    seq_length: *train_seq_length
+    global_batch_size: *train_global_batch_size
+    micro_batch_size: *train_micro_batch_size
+    dataset:
+      type: base_nlp_json
+      kwargs:
+        json_file: /devsft_afs_c/yujinbiao/stanford_alpaca/alpaca_all.json
+        transformer: [*tokenization]
+        json_type: all
+    batch_sampler:
+      type: megatron_pretrain_random
+      kwargs:
+        micro_batch_size: *train_micro_batch_size
+    batch_collector:
+      type: batch_seq
+      kwargs:
+        max_seq_length: *train_seq_length
+    data_loader:
+      type: base
+      kwargs:
+        num_workers: 2
+        pin_memory: False
+        seed: *seed
+    batch_pipe:
+      type: json_batch_seq
+      kwargs:
+        reset_position_ids: False
+        reset_attention_mask: False
+        eod_mask_loss: False
+        # loss_on_targets_only: True
+    # notice the batch_calculator only works at the training time
+    batch_calculator:
+      type: constant_num
+      kwargs:
+        global_batch_size: *train_global_batch_size
+        micro_batch_size: *train_micro_batch_size
+  infer:
+    seq_length: &infer_seq_length 40
+    global_batch_size: &infer_global_batch_size 1
+    micro_batch_size: &infer_micro_batch_size 1
+    batch_pipe:
+      type: token_batch_pipe
+      kwargs:
+        reset_position_ids: False
+        reset_attention_mask: False
+        eod_mask_loss: False
+        loss_on_targets_only: False
+
+
+trainer:
+  # train_samples: 1000
+  train_iters:  5000
+  optimizer:
+    optimizer: adam
+    lr: 1.25e-5
+    weight_decay: 1.0e-1
+    clip_grad: 1.0
+    initial_loss_scale: 65536.0
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+  lr_scheduler:
+    type: iter_base_annealing
+    kwargs:
+      min_lr: 1.25e-6
+      decay_style: cosine
+      lr_warmup_iters: 100
+      train_iters: 5000
+      use_checkpoint_lr_scheduler: False
+      override_lr_scheduler: False
+
+saver:
+  save_path: /deeplink_afs/yangbo1/easyllm/checkpoints/llama_8b_ascend
+  save_interval: 2000             # set save_interval to 0 to not save any ckpt.
+  save_mode: no_deepspeed
+  save_optim: True
+  save_rng_state: True
+  save_zero: True
+
+loader:
+  load_path: /ailab_internlm_data/share_data/llm_data/llama3/hf/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/2b724926966c141d5a60b14e75a5ef5c0ab7a6f0
+  load_mode: huggingface
+  load_optim: True
+  # load_rng_state: True
+  load_rng_state: False
+  load_zero: False
+  load_base_state: True
+  debug: True
+
+hooks:
+  - type: train_val_logger
+    kwargs:
+      log_interval: 1
+      report_memory_interval: 10
+      log_dir: /deeplink_afs/yangbo1/easyllm/checkpoints/llama_8b_ascend
+      tensorboard: True
+
+
+
