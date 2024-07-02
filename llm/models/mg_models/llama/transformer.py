@@ -56,9 +56,12 @@ except ImportError:
     rearrange = None
 
 try:
-    from flash_attn.flash_attn_interface import flash_attn_varlen_kvpacked_func, flash_attn_varlen_qkvpacked_func
-    from flash_attn.bert_padding import unpad_input, pad_input
+    from deeplink_ext.easyllm_ops import flash_attn_qkvpacked_func, flash_attn_kvpacked_func, flash_attn_func, flash_attn_varlen_qkvpacked_func, flash_attn_varlen_kvpacked_func, flash_attn_varlen_func
+    from deeplink_ext.easyllm_ops.bert_padding import unpad_input, pad_input
+    # from flash_attn.flash_attn_interface import flash_attn_varlen_kvpacked_func, flash_attn_varlen_qkvpacked_func
+    # from flash_attn.bert_padding import unpad_input, pad_input
 except ImportError:
+    print("Failed to import flash attention!")
     flash_attn_varlen_kvpacked_func, flash_attn_varlen_qkvpacked_func = None, None
     unpad_input, pad_input = None, None
 

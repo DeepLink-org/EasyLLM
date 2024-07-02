@@ -3,6 +3,7 @@ import time
 import os
 
 import torch
+import torch_dipu
 from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
 from tqdm import tqdm
 import json
