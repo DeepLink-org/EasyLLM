@@ -14,6 +14,9 @@ export PYTHONPATH=$ROOT/llm/models:$ROOT:$ROOT/llm/utils/tools:$PYTHONPATH
 
 export ASCEND_RUNTIME=1
 
+export HCCL_INTRA_ROCE_ENABLE=1
+export HCCL_INTRA_PCIE_ENABLE=0
+
 echo "START TIME: $(date)"
 
 # pip install peft
