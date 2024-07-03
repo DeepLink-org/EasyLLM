@@ -155,4 +155,3 @@ model:
   type: llama_7b
   kwargs:
     use_flash_attn: True
-
