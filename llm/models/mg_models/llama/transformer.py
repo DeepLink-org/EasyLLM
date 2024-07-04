@@ -63,6 +63,25 @@ except ImportError:
     unpad_input, pad_input = None, None
 
 
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
+    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """
+    if n_rep == 1:
+        return hidden_states
+
+    # batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if len(hidden_states.shape) == 3:
+        slen, num_key_value_heads, head_dim = hidden_states.shape
+        hidden_states = hidden_states[:, :, None, :].expand(slen, num_key_value_heads, n_rep, head_dim)
+        return hidden_states.reshape(slen, num_key_value_heads * n_rep, head_dim)
+    elif len(hidden_states.shape) == 4:
+        slen, bs, num_key_value_heads, head_dim = hidden_states.shape
+        hidden_states = hidden_states[:, :, :, None, :].expand(slen, bs, num_key_value_heads, n_rep, head_dim)
+        return hidden_states.reshape(slen, bs, num_key_value_heads * n_rep, head_dim)
+
+
 class FlashAttention(nn.Module):
     """Implement the scaled dot product attention with softmax.
     Arguments
@@ -353,6 +372,7 @@ class ParallelAttention(MegatronModule):
 
         coeff = None
         self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
+        # if unflash_attn, self.apply_query_key_layer_scaling = False
         if self.apply_query_key_layer_scaling:
             coeff = self.layer_number
             self.norm_factor *= coeff
@@ -497,6 +517,10 @@ class ParallelAttention(MegatronModule):
                 context_layer = self.core_attention_flash(query_layer, key_layer, value_layer, qk_mask, cu_seqlens)
             context_layer = rearrange(context_layer, 'b s h d -> s b (h d)').contiguous()
         else:
+            if nq_head != nk_head:
+                n_rep = nq_head // nk_head
+                key_layer = repeat_kv(key_layer, n_rep)
+
             if self.use_matmul:
                 # align peft
                 matmul_result = torch.matmul(
@@ -530,6 +554,8 @@ class ParallelAttention(MegatronModule):
                     key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
                     beta=beta, alpha=(1.0 / self.norm_factor))
                 value_layer = value_layer.reshape(sk, bs, nk_head, -1)
+                if nq_head != nk_head:
+                    value_layer = repeat_kv(value_layer, n_rep)
 
             # change view to [b, np, sq, sk]
             attention_scores = matmul_result.view(bs, nq_head, sq, sk)
@@ -556,7 +582,15 @@ class ParallelAttention(MegatronModule):
             # ===========================
 
             # attention scores and attention mask [b, np, sq, sk]
-            attention_probs = self.scale_mask_softmax(attention_scores, attention_mask)
+            # attention_probs = self.scale_mask_softmax(attention_scores.clone(), None) # attention_mask)
+            batch_size, seq_length = hidden_states.shape[1], hidden_states.shape[0]
+            past_key_values_length = 0
+            from .attn_mask_utils import _prepare_4d_causal_attention_mask
+            attention_mask = _prepare_4d_causal_attention_mask(
+                None, (batch_size, seq_length), hidden_states.transpose(0, 1), past_key_values_length
+            )
+            attention_scores = attention_scores + attention_mask
+            attention_probs = nn.functional.softmax(attention_scores, dim=-1, dtype=torch.float32).to(query_layer.dtype)
 
             # This is actually dropping out entire tokens to attend to, which might
             # seem a bit unusual, but is taken from the original Transformer paper.
