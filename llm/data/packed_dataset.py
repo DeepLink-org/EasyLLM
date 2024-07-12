@@ -138,8 +138,8 @@ class PackedDataset(Dataset):
             lengths_dict = dict()
 
             def decode_text(idx):
-                meta = self.dataset.__getitem__(idx)
-                lengths_dict[idx] = len(meta['input_ids'])
+                meta, out_idx = self.dataset.get_meta(idx)
+                lengths_dict[idx] = (out_idx, len(meta['input_ids']))
             with Pool(self.worker) as p:
                 _ = p.map(decode_text, origin_indexs[:])
             for idx in range(len(self.dataset)):
