@@ -74,6 +74,12 @@ class HFRunner(object):
         from llm.utils.general.hf_utils import set_random_seed
         set_random_seed(self.config['runtime'].get('seed', 42))
 
+        if self.config['deepspeed']['config']["zero_optimization"]["stage"] == 3:
+            deepspeed.init_distributed(dist_backend='nccl')
+
+            from transformers.integrations.deepspeed import HfTrainerDeepSpeedConfig
+            self.hf_deepspeed_config = HfTrainerDeepSpeedConfig(self.config['deepspeed']['config'])
+
     def build(self):
         self.build_env()
         self.build_tokenizer()
@@ -122,6 +128,7 @@ class HFRunner(object):
                 self.model = DDP(self.model,
                                  broadcast_buffers=False,
                                  find_unused_parameters=False)
+        torch.cuda.empty_cache()
 
     def build_trainer(self):
         world_size = get_world_size()
@@ -243,6 +250,7 @@ class HFRunner(object):
             self.start_iter * self.gradient_accumulation_steps,
             self.train_iters * self.gradient_accumulation_steps,
         ):
+            torch.cuda.empty_cache()
             self.cur_iter = iteration // self.gradient_accumulation_steps
             batch = self.get_batch()
             self._hooks('before_train_iter', self.cur_iter, batch)
@@ -275,7 +283,9 @@ class HFRunner(object):
             if (iteration + 1) % self.gradient_accumulation_steps == 0:
                 self._save(self.cur_iter)
                 self._hooks('after_train_iter', self.cur_iter, output)
-        save_hf_checkpoint(self, self.config['saver'], self.train_iters)
+        if self.config['deepspeed']['config']["zero_optimization"]["stage"] == 3:
+            state_dict = self.model._zero3_consolidated_16bit_state_dict()
+            save_hf_checkpoint(self, self.config['saver'], self.train_iters, state_dict=state_dict)
         self._hooks('after_train')
 
     def infer(self):
