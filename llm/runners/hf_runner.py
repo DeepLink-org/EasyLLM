@@ -255,7 +255,7 @@ class HFRunner(object):
             batch = self.get_batch()
             self._hooks('before_train_iter', self.cur_iter, batch)
             with torch.cuda.amp.autocast(enabled=True, dtype=self.dtype):
-                if batch["position_ids"] is not None and batch["cu_seqlens"] is not None:
+                if batch["cu_seqlens"] is not None and batch["cu_seqlens"].sum() != -1:
                     output = self.model(batch['input_ids'],
                                         batch['attention_mask'],
                                         labels=batch['labels'],
@@ -286,6 +286,8 @@ class HFRunner(object):
         if self.config['deepspeed']['config']["zero_optimization"]["stage"] == 3:
             state_dict = self.model._zero3_consolidated_16bit_state_dict()
             save_hf_checkpoint(self, self.config['saver'], self.train_iters, state_dict=state_dict)
+        else:
+            save_hf_checkpoint(self, self.config['saver'], self.train_iters)
         self._hooks('after_train')
 
     def infer(self):

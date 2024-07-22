@@ -208,7 +208,8 @@ class InternToolParser(object):
                  use_knowledge=True,
                  use_interpreter=True,
                  ensure_ascii=False,
-                 tool_mode='merge'):
+                 tool_mode='merge',
+                 add_bos=True):
         # system prompt won't be deleted,
         self.tokenizer = tokenizer
         self.ignore_index = ignore_index
@@ -230,6 +231,7 @@ class InternToolParser(object):
         self.use_interpreter = use_interpreter
         self.ensure_ascii = ensure_ascii
         self.tool_mode = tool_mode
+        self.add_bos = add_bos
 
     def __call__(self, meta):
         if 'input' in meta:
@@ -247,8 +249,9 @@ class InternToolParser(object):
         tokens = []
         labels = []
 
-        tokens.extend([self.tokenizer.bos_token_id])
-        labels.extend([self.ignore_index])
+        if self.tokenizer.bos_token_id is not None and self.add_bos:
+            tokens.extend([self.tokenizer.bos_token_id])
+            labels.extend([self.ignore_index])
         conversation_messages = messages
         if self.use_system:
             if messages[0]['role'] == 'system' and messages[0]['content'] != '':

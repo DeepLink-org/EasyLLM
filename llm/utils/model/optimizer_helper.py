@@ -60,8 +60,14 @@ def build_cls_instance(module, cfg):
 
 def filter_freeze_param_groups(param_groups):
     filter_param_groups = []
+    unique_params = set()
     for _, param_group in enumerate(param_groups):
-        trainable_parameters = [param for param in param_group['params'] if param.requires_grad]
+        trainable_parameters = []
+        for param in param_group['params']:
+            if param not in unique_params and param.requires_grad:
+                unique_params.add(param)
+                trainable_parameters.append(param)
+        param_group['params'] = trainable_parameters
         if len(trainable_parameters) > 0:
             filter_param_groups.append(param_group)
     return filter_param_groups
