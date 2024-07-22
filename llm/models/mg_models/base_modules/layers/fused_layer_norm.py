@@ -7,13 +7,21 @@ import torch
 from torch.nn.parameter import Parameter
 from torch.nn import init
 import torch.nn.functional as F
-
 from llm.utils.env import dist_env
+import os
 
-try:
-    from flash_attn.ops.rms_norm import rms_norm as flash_attn_rms_norm
-except ImportError:
-    flash_attn_rms_norm = None
+
+if os.environ.get('ACCELERATOR_BACKEND', "CUDA") == 'CUDA':
+    try:
+        from flash_attn.ops.rms_norm import rms_norm as flash_attn_rms_norm
+    except ImportError:
+        flash_attn_rms_norm = None
+elif os.environ.get('ACCELERATOR_BACKEND') == 'TORCH_NPU':
+    from llm.models.mg_models.llama.npu_flash import flash_attn_rms_norm
+elif os.environ.get('ACCELERATOR_BACKEND') == 'DEEPLINK_DIPU':
+    from deeplink_ext.easyllm_ops import rms_norm as flash_attn_rms_norm
+else:
+    pass
 
 
 # no bias version
@@ -49,8 +57,8 @@ class RMSNorm(torch.nn.Module):
     def forward(self, input):
 
         if self.layernorm_tp_auto_sync or self.sequence_parallel:
-            torch.distributed.all_reduce(self.weight,
-                                         op=torch.distributed.ReduceOp.AVG,
+            torch.distributed.all_reduce(self.weight / dist_env.get_tensor_model_parallel_world_size(),
+                                         op=torch.distributed.ReduceOp.SUM,
                                          group=dist_env.get_tensor_model_parallel_group())
 
         if self.use_flash_attn and flash_attn_rms_norm and input.shape[-1] <= 8192:

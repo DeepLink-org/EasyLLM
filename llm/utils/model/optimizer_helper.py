@@ -14,6 +14,13 @@
 # limitations under the License.
 import torch
 from .sophia import SophiaG
+import os
+if os.environ.get("ACCELERATOR_BACKEND") == "TORCH_NPU":
+    from .npu_optimizer_helper import AdamW as NpuAdamW
+elif os.environ.get("ACCELERATOR_BACKEND") == "DEEPLINK_DIPU":
+    from deeplink_ext.easyllm_ops import AdamW as DipuAdamW
+else:
+    pass
 
 
 def _get_params_for_weight_decay_optimization(model):
@@ -95,6 +102,10 @@ def build_optimizer(cfg_optim, model, deepspeed=True):
         optimizer = build_cls_instance(apex.optimizers, cfg_optim)
     elif cfg_optim['type'] in ['SophiaG']:
         optimizer = SophiaG(**cfg_optim['kwargs'])
+    elif cfg_optim['type'] in ['NpuAdamW']:
+        optimizer = NpuAdamW(**cfg_optim['kwargs'])
+    elif cfg_optim['type'] in ['DipuAdamW']:
+        optimizer = DipuAdamW(**cfg_optim['kwargs'])
     else:
         optimizer = build_cls_instance(torch.optim, cfg_optim)
 
