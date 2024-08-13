@@ -114,7 +114,8 @@ class VocabParallelEmbedding(torch.nn.Module):
                          (input_ >= self.vocab_end_index)
             # Mask the input.
             masked_input = input_.clone() - self.vocab_start_index
-            masked_input[input_mask] = 0
+            # masked_input[input_mask] = 0
+            masked_input.masked_fill_(input_mask, 0)
         else:
             # input_ is garanted to be in the range [0:self.vocab_end_index -
             # self.vocab_start_index] thanks to the first check
@@ -127,7 +128,8 @@ class VocabParallelEmbedding(torch.nn.Module):
                                       self.sparse)
         # Mask the output embedding.
         if self.tensor_model_parallel_size > 1:
-            output_parallel[input_mask, :] = 0.0
+            # output_parallel[input_mask, :] = 0.0
+            output_parallel.masked_fill_(input_mask.unsqueeze(dim=2), 0.0)
         # Reduce across all the model parallel GPUs.
         output = dist_env.reduce_from_tensor_model_parallel_region(output_parallel)
 
