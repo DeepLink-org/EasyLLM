@@ -155,11 +155,13 @@ class TrainValLoggerHook(Hook):
             coefficient = 32 if self.model_args['glu_activation'] else 24
             flops_per_iteration = (coefficient * checkpoint_activations_factor * batch_size * self.model_args['seq_len'] * self.model_args['num_layers'] * (self.model_args['hidden_size']**2)) * (1. + (self.model_args['seq_len'] / (6. * self.model_args['hidden_size'])) + (self.model_args['vocab_size'] / (16. * self.model_args['num_layers'] * self.model_args['hidden_size'])))        # noqa
             tflops = flops_per_iteration / (elapsed_time_per_iteration * torch.distributed.get_world_size() * (10**12))
+            tgs = consumed_train_tokens / (cur_iter + 1) / torch.distributed.get_world_size() / elapsed_time_per_iteration
 
             log_string = ' iteration {:8d}/{:8d} |'.format(cur_iter + 1, train_iters)
             log_string += ' consumed samples: {:12d} |'.format(consumed_train_samples)
             log_string += ' consumed tokens: {:12d} |'.format(consumed_train_tokens)
             log_string += ' elapsed time per iteration (s): {:.2f} |'.format(elapsed_time_per_iteration)
+            log_string += ' tgs (tokens/gpu/second): {:.2f} |'.format(tgs)
             log_string += ' learning rate: {:.3E} |'.format(learning_rate)
             log_string += ' global batch size: {:5d} |'.format(batch_size)
             if self.tensorboard_writer is not None:
