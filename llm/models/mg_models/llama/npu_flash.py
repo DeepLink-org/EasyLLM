@@ -22,9 +22,9 @@ def flash_attn_varlen_qkvpacked_func(
 ):
     if softmax_scale is None:
         softmax_scale = qkv.shape[-1] ** (-0.5)
-    q = qkv[:, 0],
-    k = qkv[:, 1],
-    v = qkv[:, 2],
+    q = qkv[:, 0]
+    k = qkv[:, 1]
+    v = qkv[:, 2]
     n = q.shape[1]
     if max_seqlen > 2048:
         sparse_mode = 2
