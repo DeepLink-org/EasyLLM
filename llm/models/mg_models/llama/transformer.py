@@ -63,16 +63,16 @@ except ImportError:
 
 if os.environ.get('ACCELERATOR_BACKEND') == 'CUDA':
     try:
-        from flash_attn.flash_attn_interface import flash_attn_varlen_kvpacked_func, flash_attn_varlen_qkvpacked_func
+        from flash_attn.flash_attn_interface import flash_attn_varlen_kvpacked_func, flash_attn_varlen_qkvpacked_func, flash_attn_kvpacked_func, flash_attn_qkvpacked_func, flash_attn_func
         from flash_attn.bert_padding import unpad_input, pad_input
     except ImportError:
         flash_attn_varlen_kvpacked_func, flash_attn_varlen_qkvpacked_func = None, None
         unpad_input, pad_input = None, None
 elif os.environ.get('ACCELERATOR_BACKEND') == 'TORCH_NPU':
-    from .npu_flash import flash_attn_varlen_kvpacked_func, flash_attn_varlen_qkvpacked_func
+    from .npu_flash import flash_attn_varlen_kvpacked_func, flash_attn_varlen_qkvpacked_func, flash_attn_kvpacked_func, flash_attn_qkvpacked_func, flash_attn_func
     from .npu_flash import unpad_input, pad_input
 elif os.environ.get('ACCELERATOR_BACKEND') == 'DEEPLINK_DIPU':
-    from deeplink_ext.easyllm_ops import flash_attn_varlen_kvpacked_func, flash_attn_varlen_qkvpacked_func
+    from deeplink_ext.easyllm_ops import flash_attn_varlen_kvpacked_func, flash_attn_varlen_qkvpacked_func, flash_attn_kvpacked_func, flash_attn_qkvpacked_func, flash_attn_func
     from deeplink_ext.easyllm_ops.bert_padding import unpad_input, pad_input
 else:
     print("no backend support")
@@ -128,30 +128,31 @@ class FlashAttention(nn.Module):
         batch_size = q.shape[0]
         seqlen = q.shape[1]
         if key_padding_mask is None:
-            q = rearrange(q, 'b s ... -> (b s) ...')
-            k = rearrange(k, 'b s ... -> (b s) ...')
-            v = rearrange(v, 'b s ... -> (b s) ...')
-            max_s = seqlen
-            if cu_seqlens is None:
-                if os.environ.get('ACCELERATOR_BACKEND', 'CUDA') != 'CUDA':
-                    cu_seqlens = torch.arange(0, (batch_size + 1) * seqlen, step=seqlen, dtype=torch.int32)
-                else:
-                    cu_seqlens = torch.arange(0, (batch_size + 1) * seqlen, step=seqlen, dtype=torch.int32, device=q.device)
-            else:
-                cu_seqlens = cu_seqlens.view(-1).int()
-            if k.shape[-2] == q.shape[-2]:
-                qkv = torch.stack([q, k, v], dim=1)
-                output = flash_attn_varlen_qkvpacked_func(
-                    qkv, cu_seqlens, max_s, self.dropout_p if self.training else 0.0,
-                    softmax_scale=self.softmax_scale, causal=self.causal
-                )
-            else:
-                kv = torch.stack([k, v], dim=1)
-                output = flash_attn_varlen_kvpacked_func(
-                    q, kv, cu_seqlens, cu_seqlens, max_s, max_s, self.dropout_p if self.training else 0.0,
-                    softmax_scale=self.softmax_scale, causal=self.causal
-                )
-            output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
+            # q = rearrange(q, 'b s ... -> (b s) ...')
+            # k = rearrange(k, 'b s ... -> (b s) ...')
+            # v = rearrange(v, 'b s ... -> (b s) ...')
+            # max_s = seqlen
+            # if cu_seqlens is None:
+            #     if os.environ.get('ACCELERATOR_BACKEND', 'CUDA') != 'CUDA':
+            #         cu_seqlens = torch.arange(0, (batch_size + 1) * seqlen, step=seqlen, dtype=torch.int32)
+            #     else:
+            #         cu_seqlens = torch.arange(0, (batch_size + 1) * seqlen, step=seqlen, dtype=torch.int32, device=q.device)
+            # else:
+            # #     cu_seqlens = cu_seqlens.view(-1).int()
+            # if k.shape[-2] == q.shape[-2]:
+            #     qkv = torch.stack([q, k, v], dim=1)
+            #     output = flash_attn_varlen_qkvpacked_func(
+            #         qkv, cu_seqlens, max_s, self.dropout_p if self.training else 0.0,
+            #         softmax_scale=self.softmax_scale, causal=self.causal
+            #     )
+            # else:
+            #     kv = torch.stack([k, v], dim=1)
+            #     output = flash_attn_varlen_kvpacked_func(
+            #         q, kv, cu_seqlens, cu_seqlens, max_s, max_s, self.dropout_p if self.training else 0.0,
+            #         softmax_scale=self.softmax_scale, causal=self.causal
+            #     )
+            # output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
+            output = flash_attn_func(q, k, v, self.dropout_p if self.training else 0.0, softmax_scale=self.softmax_scale, causal=self.causal)
         else:
             nheads = q.shape[-2]
             q = rearrange(q, 'b s h d -> b s (h d)')
