@@ -47,8 +47,23 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 from .configuration_qwen2 import Qwen2Config
-from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
-from flash_attn import flash_attn_func, flash_attn_varlen_func
+# from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
+# from flash_attn import flash_attn_func, flash_attn_varlen_func
+if os.environ.get('ACCELERATOR_BACKEND') == 'CUDA':
+    try:        
+        from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
+        from flash_attn import flash_attn_func, flash_attn_varlen_func
+    except ImportError:
+        flash_attn_func, flash_attn_varlen_func = None, None
+        index_first_axis, pad_input, unpad_input = None, None, None
+# elif os.environ.get('ACCELERATOR_BACKEND') == 'TORCH_NPU':
+#     from .npu_flash import flash_attn_varlen_kvpacked_func, flash_attn_varlen_qkvpacked_func
+#     from .npu_flash import unpad_input, pad_input
+elif os.environ.get('ACCELERATOR_BACKEND') == 'DEEPLINK_DIPU':
+    from deeplink_ext.easyllm_ops import flash_attn_func, flash_attn_varlen_func
+    from deeplink_ext.easyllm_ops.bert_padding import index_first_axis, pad_input, unpad_input 
+else:
+    print("no backend support")
 
 
 _CHECKPOINT_FOR_DOC = "Qwen/Qwen2-7B-beta"
